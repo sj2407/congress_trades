@@ -133,14 +133,16 @@ def run(lookback_hours: int, dry_run: bool, house_year: int | None, max_house: i
         enriched.append((t, severity, reasons, sector, industry, prices, pos))
 
     flagged = [x for x in enriched if x[1] != "none"]
-    if not flagged and not preview_recent:
-        print(f"  {len(enriched)} new trades, 0 flagged for committee conflict — skipping email.", flush=True)
-        if not dry_run:
-            mark_seen(new_trades)
+    if not enriched and not preview_recent:
+        print("  0 new disclosures — skipping email.", flush=True)
         return 0
 
     high = sum(1 for _, s, *_ in flagged if s == "high")
-    subject = f"Congress trades — {len(flagged)} flagged ({high} high) — {date.today().isoformat()}"
+    subject = (
+        f"Congress trades — {len(enriched)} new"
+        f"{f' ({len(flagged)} flagged, {high} high)' if flagged else ' (none flagged)'}"
+        f" — {date.today().isoformat()}"
+    )
     body = render_email_html(enriched)
 
     if dry_run:

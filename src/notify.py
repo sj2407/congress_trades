@@ -86,24 +86,37 @@ def _row_html(
 def render_email_html(
     items: List[Tuple[Trade, str, List[str], str, str, PriceInfo, PositionStatus]],
 ) -> str:
-    flagged = [x for x in items if x[1] != "none"]
-    unflagged_count = len(items) - len(flagged)
-    flagged_sorted = sorted(
-        flagged,
+    # Sort: flagged trades first (high/mod/low), then unflagged. Within each
+    # group, most recently disclosed first.
+    items_sorted = sorted(
+        items,
         key=lambda x: (SEVERITY_RANK.get(x[1], 9), -(x[0].disclosure_date.toordinal())),
     )
-    rows = "".join(_row_html(*x) for x in flagged_sorted)
+    rows = "".join(_row_html(*x) for x in items_sorted)
+    flagged = [x for x in items if x[1] != "none"]
     high_count = sum(1 for _, sev, *_ in flagged if sev == "high")
     mod_count = sum(1 for _, sev, *_ in flagged if sev == "moderate")
     low_count = sum(1 for _, sev, *_ in flagged if sev == "low")
-    head = (
-        f"<p><strong>{len(flagged)} flagged trade(s)</strong> — "
-        f"🔴 {high_count} high · 🟠 {mod_count} moderate · 🟡 {low_count} low."
-        f"<br><span style='color:#6b7280;font-size:13px'>"
-        f"Plus {unflagged_count} other new trade(s) with no committee/sector overlap (not shown).</span></p>"
-    )
-    if not flagged:
-        rows = '<tr><td colspan="16" style="padding:30px;text-align:center;color:#666">No committee-relevant conflicts in today\'s new trades.</td></tr>'
+    none_count = len(items) - len(flagged)
+    if flagged:
+        head = (
+            f"<p><strong>{len(items)} new disclosure(s)</strong> — "
+            f"<span style='color:#dc2626'>🔴 {high_count} strong</span> · "
+            f"<span style='color:#ea580c'>🟠 {mod_count} some</span> · "
+            f"<span style='color:#ca8a04'>🟡 {low_count} weak</span> · "
+            f"<span style='color:#6b7280'>⚪ {none_count} no committee match</span>."
+            f"<br><span style='color:#6b7280;font-size:13px'>"
+            f"Flagged trades are shown first; unflagged trades follow.</span></p>"
+        )
+    else:
+        head = (
+            f"<p><strong>{len(items)} new disclosure(s)</strong> — "
+            f"<span style='color:#6b7280'>none flagged for committee/sector overlap.</span>"
+            f"<br><span style='color:#6b7280;font-size:13px'>"
+            f"All trades shown below for completeness.</span></p>"
+        )
+    if not items:
+        rows = '<tr><td colspan="16" style="padding:30px;text-align:center;color:#666">No new disclosures since the last run.</td></tr>'
     return f"""
     <html><body style="font-family:-apple-system,Helvetica,Arial,sans-serif;color:#111">
       <h2 style="margin-bottom:4px">Congress trades — daily digest</h2>
