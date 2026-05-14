@@ -1,0 +1,22 @@
+{
+  "BA": {
+    "industry": "Aerospace & Defense",
+    "sector": "Industrials"
+  },
+  "JPM": {
+    "industry": "Banks - Diversified",
+    "sector": "Financial Services"
+  },
+  "LMT": {
+    "industry": "Aerospace & Defense",
+    "sector": "Industrials"
+  },
+  "NVDA": {
+    "industry": "Semiconductors",
+    "sector": "Technology"
+  },
+  "XOM": {
+    "industry": "Oil & Gas Integrated",
+    "sector": "Energy"
+  }
+}

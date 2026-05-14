@@ -2,9 +2,13 @@
 __pycache__/
 *.pyc
 .env
-data/cache/
-data/*.json
-data/*.sqlite
 data/*.zip
 data/pdfs/
+data/preview.html
+data/backtest*.csv
 .DS_Store
+
+# State files we DO commit (so each cron run inherits prior state):
+#   data/seen.sqlite              — which trades we've already emailed
+#   data/cache/senate_first_seen.json — when we first observed each Senate record
+#   data/cache/sectors.json       — ticker→sector lookup cache
