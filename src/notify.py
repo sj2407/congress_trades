@@ -49,13 +49,24 @@ def _row_html(t: Trade, severity: str, reasons: List[str], sector: str, industry
 def render_email_html(
     items: List[Tuple[Trade, str, List[str], str, str]],
 ) -> str:
-    items_sorted = sorted(
-        items,
+    flagged = [x for x in items if x[1] != "none"]
+    unflagged_count = len(items) - len(flagged)
+    flagged_sorted = sorted(
+        flagged,
         key=lambda x: (SEVERITY_RANK.get(x[1], 9), -(x[0].disclosure_date.toordinal())),
     )
-    rows = "".join(_row_html(t, sev, r, s, i) for t, sev, r, s, i in items_sorted)
-    high_count = sum(1 for _, sev, *_ in items if sev == "high")
-    head = f"<p><strong>{len(items)} new trade(s)</strong> — {high_count} flagged as committee-relevant conflicts.</p>"
+    rows = "".join(_row_html(t, sev, r, s, i) for t, sev, r, s, i in flagged_sorted)
+    high_count = sum(1 for _, sev, *_ in flagged if sev == "high")
+    mod_count = sum(1 for _, sev, *_ in flagged if sev == "moderate")
+    low_count = sum(1 for _, sev, *_ in flagged if sev == "low")
+    head = (
+        f"<p><strong>{len(flagged)} flagged trade(s)</strong> — "
+        f"🔴 {high_count} high · 🟠 {mod_count} moderate · 🟡 {low_count} low."
+        f"<br><span style='color:#6b7280;font-size:13px'>"
+        f"Plus {unflagged_count} other new trade(s) with no committee/sector conflict (not shown).</span></p>"
+    )
+    if not flagged:
+        rows = '<tr><td colspan="12" style="padding:30px;text-align:center;color:#666">No committee-relevant conflicts in today\'s new trades.</td></tr>'
     return f"""
     <html><body style="font-family:-apple-system,Helvetica,Arial,sans-serif;color:#111">
       <h2 style="margin-bottom:4px">Congress trades — daily digest</h2>
