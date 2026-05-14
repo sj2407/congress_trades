@@ -2,7 +2,38 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Optional
+from typing import List, Optional
+
+
+@dataclass
+class PriceInfo:
+    """Prices around a single trade, all closes or None when unavailable."""
+    at_trade: Optional[float] = None
+    at_disclosure: Optional[float] = None
+    today: Optional[float] = None
+    today_date: Optional[date] = None
+
+    @property
+    def gap_pct(self) -> Optional[float]:
+        """Move from trade to disclosure (raw, not direction-adjusted)."""
+        if self.at_trade and self.at_disclosure and self.at_trade != 0:
+            return (self.at_disclosure - self.at_trade) / self.at_trade * 100
+        return None
+
+    @property
+    def post_pct(self) -> Optional[float]:
+        """Move from disclosure to latest close (raw)."""
+        if self.at_disclosure and self.today and self.at_disclosure != 0:
+            return (self.today - self.at_disclosure) / self.at_disclosure * 100
+        return None
+
+
+@dataclass
+class PositionStatus:
+    """Whether this position is closed/open as best we can tell from the dataset."""
+    state: str = "unknown"      # "open", "closed", "unknown"
+    closed_date: Optional[date] = None
+    closed_price: Optional[float] = None
 
 
 @dataclass

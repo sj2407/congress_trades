@@ -24,8 +24,10 @@ from src.conflicts import detect_conflict
 from src.fetch_house import fetch_house_trades
 from src.fetch_senate import fetch_senate_trades
 from src.notify import render_email_html, send_email
+from src.prices import latest_price, latest_price_date, price_on_or_after
 from src.sectors import lookup_sector
 from src.store import filter_new, mark_seen
+from src.types import PositionStatus, PriceInfo
 
 
 def _store_is_empty() -> bool:
@@ -77,6 +79,16 @@ def run(lookback_hours: int, dry_run: bool, house_year: int | None, max_house: i
         print("No new trades — skipping email.", flush=True)
         return 0
 
+    # Index all trades (Senate + House) by (member, ticker) so we can detect
+    # whether a flagged purchase has been closed by a later sale.
+    def _norm(s: str) -> str:
+        return " ".join(s.lower().split())
+    later_sales: dict[tuple[str, str], list] = {}
+    for t in all_trades:
+        if not t.ticker or "ale" not in t.transaction_type.lower():
+            continue
+        later_sales.setdefault((_norm(t.member_name), t.ticker.upper()), []).append(t)
+
     enriched = []
     for t in new_trades:
         committees = lookup_committees(t.member_name)
@@ -87,7 +99,38 @@ def run(lookback_hours: int, dry_run: bool, house_year: int | None, max_house: i
             t.party = info.get("party")
         sector, industry = lookup_sector(t.ticker) if t.ticker else ("", "")
         severity, reasons = detect_conflict(committees, sector, industry)
-        enriched.append((t, severity, reasons, sector, industry))
+        # Prices and position status are only meaningful when we know the ticker
+        prices = PriceInfo()
+        pos = PositionStatus()
+        if t.ticker:
+            if t.transaction_date:
+                prices.at_trade = price_on_or_after(t.ticker, t.transaction_date)
+            if t.disclosure_date:
+                prices.at_disclosure = price_on_or_after(t.ticker, t.disclosure_date)
+            prices.today = latest_price(t.ticker)
+            prices.today_date = latest_price_date(t.ticker)
+            # Position status: only meaningful for purchases
+            if "urchase" in t.transaction_type.lower():
+                key = (_norm(t.member_name), t.ticker.upper())
+                later = [
+                    s for s in later_sales.get(key, [])
+                    if s.transaction_date and t.transaction_date
+                    and s.transaction_date > t.transaction_date
+                ]
+                if later:
+                    later.sort(key=lambda s: s.transaction_date)
+                    close = later[0]
+                    pos.state = "closed"
+                    pos.closed_date = close.transaction_date
+                    pos.closed_price = (
+                        price_on_or_after(t.ticker, close.transaction_date)
+                        if close.transaction_date else None
+                    )
+                else:
+                    pos.state = "open"
+            else:
+                pos.state = ""  # not applicable for sales
+        enriched.append((t, severity, reasons, sector, industry, prices, pos))
 
     flagged = [x for x in enriched if x[1] != "none"]
     if not flagged and not preview_recent:

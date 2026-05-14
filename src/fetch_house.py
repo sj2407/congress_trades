@@ -57,7 +57,7 @@ def _parse_date(s: str) -> Optional[date]:
     s = (s or "").strip()
     if not s:
         return None
-    for fmt in ("%m/%d/%Y", "%-m/%-d/%Y", "%m/%d/%y"):
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%-m/%-d/%Y", "%m/%d/%y"):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:
@@ -144,9 +144,11 @@ def _parse_ptr_pdf(pdf_bytes: bytes) -> List[Tuple[Optional[str], str, str, Opti
                         # Real PTR rows always carry an amount range like "$1,001 -"
                         if "$" not in (amt or ""):
                             continue
+                        # PDF cells can split across lines; normalize whitespace
+                        amt = re.sub(r"\s+", " ", amt.replace("\n", " ")).strip()
                         m = TICKER_RE.search(asset or "")
                         ticker = m.group(1) if m else None
-                        asset_clean = TICKER_RE.sub("", asset or "").replace("\n", " ").strip(" -")
+                        asset_clean = re.sub(r"\s+", " ", TICKER_RE.sub("", asset or "").replace("\n", " ")).strip(" -")
                         tx_norm = TX_TYPE_MAP.get(tx.upper(), tx)
                         rows.append((
                             ticker,
