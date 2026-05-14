@@ -26,6 +26,7 @@ import sys
 from datetime import date, timedelta
 from typing import Optional
 
+import pandas as pd
 import yfinance as yf
 
 from src.fetch_senate import fetch_senate_trades
@@ -44,27 +45,39 @@ def _direction(tx_type: str) -> int:
     return 0
 
 
-_PRICE_CACHE: dict[tuple[str, str, str], Optional[float]] = {}
+_HISTORY_CACHE: dict[str, Optional[pd.DataFrame]] = {}
+
+
+def _load_history(ticker: str) -> Optional[pd.DataFrame]:
+    """Fetch the full price history for a ticker once and cache it in-process."""
+    if ticker in _HISTORY_CACHE:
+        return _HISTORY_CACHE[ticker]
+    df: Optional[pd.DataFrame] = None
+    try:
+        df = yf.Ticker(ticker).history(period="max", auto_adjust=True)
+        if df is None or df.empty:
+            df = None
+        else:
+            df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
+    except Exception:
+        df = None
+    _HISTORY_CACHE[ticker] = df
+    return df
 
 
 def _price_on_or_after(ticker: str, target: date, window_days: int = 7) -> Optional[float]:
     """Closing price on `target` or the first trading day within `window_days` after."""
     if not ticker or not target:
         return None
-    start = target.isoformat()
-    end = (target + timedelta(days=window_days + 1)).isoformat()
-    key = (ticker, start, end)
-    if key in _PRICE_CACHE:
-        return _PRICE_CACHE[key]
-    val: Optional[float] = None
-    try:
-        df = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=True)
-        if df is not None and not df.empty:
-            val = float(df["Close"].iloc[0])
-    except Exception:
-        val = None
-    _PRICE_CACHE[key] = val
-    return val
+    df = _load_history(ticker)
+    if df is None or df.empty:
+        return None
+    target_ts = pd.Timestamp(target)
+    window_end = target_ts + pd.Timedelta(days=window_days)
+    slice_ = df.loc[(df.index >= target_ts) & (df.index <= window_end)]
+    if slice_.empty:
+        return None
+    return float(slice_["Close"].iloc[0])
 
 
 def run(limit: Optional[int], out_path: str, lag_days: int) -> None:
@@ -81,7 +94,14 @@ def run(limit: Optional[int], out_path: str, lag_days: int) -> None:
     ]
     if limit:
         pool = pool[:limit]
-    print(f"Backtesting {len(pool)} trades (assumed lag = {lag_days}d)…", flush=True)
+
+    # Pre-warm price history per unique ticker so each trade is a fast lookup.
+    unique = sorted({t.ticker for t in pool if t.ticker})
+    print(f"Backtesting {len(pool)} trades across {len(unique)} unique tickers (assumed lag = {lag_days}d)…", flush=True)
+    for i, tk in enumerate(unique, 1):
+        _load_history(tk)
+        if i % 100 == 0:
+            print(f"  prefetched {i}/{len(unique)} tickers", flush=True)
     fieldnames = [
         "member", "ticker", "tx_type", "direction",
         "trade_date", "disclosure_date", "lag_days",
