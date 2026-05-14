@@ -20,24 +20,43 @@ COMMITTEE_JURISDICTION: Dict[str, Set[str]] = {
     "homeland security": {"defense", "cyber", "security", "border"},
     "veterans": {"healthcare", "pharma", "insurance"},
 
-    # Finance
+    # Finance (committees specifically govern these industries — not "broad")
     "financial services": {"bank", "insurance", "asset management", "credit", "real estate", "reit", "financial"},
     "banking, housing, and urban affairs": {"bank", "insurance", "real estate", "reit", "financial"},
-    "ways and means": {"_broad_"},  # tax jurisdiction touches everything
-    "finance": {"_broad_"},          # senate finance: tax + healthcare + trade
-    "budget": {"_broad_"},
-    "appropriations": {"_broad_"},
+    # Note: Senate Finance and House Ways & Means write tax law that touches
+    # everything; that's too broad to be a useful signal. We instead map their
+    # SUBCOMMITTEES explicitly when relevant (e.g. Finance — Health Care).
+    "finance — health care": {"healthcare", "pharma", "biotech", "insurance"},
+    "finance — energy, natural resources, and infrastructure": {"energy", "oil", "gas", "utilities"},
+    "finance — international trade, customs, and global competitiveness": {"_trade_"},
+
+    # Foreign affairs (export controls, sanctions, foreign military sales)
+    "foreign relations": {"defense", "aerospace"},
+    "foreign affairs": {"defense", "aerospace"},
 
     # Tech / commerce / telecom
     "commerce, science, and transportation": {
         "tech", "software", "internet", "media", "telecom", "communications",
         "airlines", "auto", "rail", "ev", "semiconductor",
+        "aerospace",  # FAA / NTSB oversight covers Boeing et al.
     },
     "energy and commerce": {
         "energy", "oil", "gas", "utilities", "pharma", "healthcare",
         "biotech", "telecom", "communications", "media", "tech",
     },
     "science, space, and technology": {"tech", "software", "semiconductor", "aerospace", "biotech"},
+
+    # Appropriations — only the agency-specific subcommittees carry signal
+    "appropriations — defense": {"defense", "aerospace"},
+    "appropriations — energy and water": {"energy", "nuclear", "utilities"},
+    "appropriations — agriculture": {"agriculture", "food"},
+    "appropriations — financial services": {"bank", "financial"},
+    "appropriations — homeland security": {"defense", "cyber", "security"},
+    "appropriations — transportation, housing": {"airlines", "rail", "auto", "real estate", "construction"},
+    "appropriations — labor, health and human services": {"healthcare", "pharma", "biotech"},
+    "appropriations — military construction, veterans": {"defense", "construction"},
+    "appropriations — commerce, justice, science": {"tech", "telecom"},
+    "appropriations — interior": {"energy", "mining", "oil", "gas"},
 
     # Energy / environment
     "energy and natural resources": {"energy", "oil", "gas", "utilities", "mining", "nuclear", "renewable"},
@@ -112,7 +131,8 @@ SECTOR_KEYWORDS: Dict[str, Set[str]] = {
     "security": {"security"},
 }
 
-BROAD_KEY = "_broad_"
+BROAD_KEY = "_broad_"   # deprecated, kept for compatibility
+TRADE_KEY = "_trade_"   # special marker: matches any equity (trade policy affects everything)
 
 
 def _normalize(s: str) -> str:
@@ -155,6 +175,9 @@ def detect_conflict(
             continue
         if BROAD_KEY in jurisdiction:
             broad_hits.append(f"{comm} (broad fiscal jurisdiction)")
+            continue
+        if TRADE_KEY in jurisdiction:
+            broad_hits.append(f"{comm} (trade policy)")
             continue
         # First sector-keyword match per committee is enough
         for jkey in jurisdiction:
