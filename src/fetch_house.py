@@ -141,11 +141,12 @@ def _parse_ptr_pdf(pdf_bytes: bytes) -> List[Tuple[Optional[str], str, str, Opti
                         nd = cell(row, "notification date", "notif")
                         amt = cell(row, "amount")
                         owner = cell(row, "owner")
-                        if not asset and not amt:
+                        # Real PTR rows always carry an amount range like "$1,001 -"
+                        if "$" not in (amt or ""):
                             continue
                         m = TICKER_RE.search(asset or "")
                         ticker = m.group(1) if m else None
-                        asset_clean = TICKER_RE.sub("", asset or "").strip(" -")
+                        asset_clean = TICKER_RE.sub("", asset or "").replace("\n", " ").strip(" -")
                         tx_norm = TX_TYPE_MAP.get(tx.upper(), tx)
                         rows.append((
                             ticker,

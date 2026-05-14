@@ -36,11 +36,12 @@ def _store_is_empty() -> bool:
     return n == 0
 
 
-def run(lookback_hours: int, dry_run: bool, house_year: int | None, max_house: int | None) -> int:
+def run(lookback_hours: int, dry_run: bool, house_year: int | None, max_house: int | None,
+        preview_recent: int | None) -> int:
     cutoff = datetime.now() - timedelta(hours=lookback_hours)
     cutoff_date = cutoff.date()
     bootstrap = _store_is_empty()
-    if bootstrap:
+    if bootstrap and not preview_recent:
         print("BOOTSTRAP: seen-store empty. Marking all existing trades as seen; no email this run.", flush=True)
 
     print(f"[{datetime.now().isoformat(timespec='seconds')}] Fetching Senate trades…", flush=True)
@@ -53,16 +54,24 @@ def run(lookback_hours: int, dry_run: bool, house_year: int | None, max_house: i
 
     all_trades = senate + house
 
-    if bootstrap:
-        mark_seen(all_trades)
-        print(f"Marked {len(all_trades)} trades as seen. Exiting.", flush=True)
-        return 0
+    if preview_recent:
+        # Preview mode: ignore seen-store, take the N most recent trades that
+        # have actual ticker info (so the matrix has something to flag against).
+        with_tk = [t for t in all_trades if t.ticker and t.transaction_date]
+        with_tk.sort(key=lambda t: t.transaction_date, reverse=True)
+        new_trades = with_tk[:preview_recent]
+        print(f"  preview mode: showing {len(new_trades)} most recent trades with tickers", flush=True)
+    else:
+        if bootstrap:
+            mark_seen(all_trades)
+            print(f"Marked {len(all_trades)} trades as seen. Exiting.", flush=True)
+            return 0
 
-    recent = [t for t in all_trades if t.disclosure_date >= cutoff_date]
-    print(f"  within last {lookback_hours}h: {len(recent)}", flush=True)
+        recent = [t for t in all_trades if t.disclosure_date >= cutoff_date]
+        print(f"  within last {lookback_hours}h: {len(recent)}", flush=True)
 
-    new_trades = filter_new(recent)
-    print(f"  new (not yet seen): {len(new_trades)}", flush=True)
+        new_trades = filter_new(recent)
+        print(f"  new (not yet seen): {len(new_trades)}", flush=True)
 
     if not new_trades:
         print("No new trades — skipping email.", flush=True)
@@ -104,8 +113,12 @@ def main() -> int:
     p.add_argument("--lookback-hours", type=int, default=int(os.environ.get("LOOKBACK_HOURS", "48")))
     p.add_argument("--house-year", type=int, default=None)
     p.add_argument("--max-house", type=int, default=None, help="Cap House PTRs (for testing)")
+    p.add_argument("--preview-recent", type=int, default=None,
+                   help="Bypass seen-filter and render the N most recent trades. "
+                        "Use to inspect the email format and matrix output. Implies --dry-run.")
     args = p.parse_args()
-    return run(args.lookback_hours, args.dry_run, args.house_year, args.max_house)
+    dry = args.dry_run or bool(args.preview_recent)
+    return run(args.lookback_hours, dry, args.house_year, args.max_house, args.preview_recent)
 
 
 if __name__ == "__main__":
