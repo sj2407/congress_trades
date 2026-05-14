@@ -1,28 +1,34 @@
-"""Generate a narrative HTML dashboard from data/backtest.csv.
+"""Narrative dashboard for the congress-trades backtest.
 
-The dashboard tells a story:
-  1. Headline — what happens between trade and disclosure
-  2. The asymmetry — purchases carry alpha, sales are noise
-  3. Does the conflict flag predict alpha?  ← the central question for the alerter
-  4. Who has the edge — best and worst members
-  5. Where the alpha is — by sector
-  6. Severity distribution — what your daily alert volume looks like historically
+Tells the story in plain English with one running example. No jargon —
+every metric is described in concrete terms.
 
-Each section opens with a one-line claim and a chart that proves or refines it.
+Sections:
+  A. The setup (running example card)
+  B. How much does the stock move during the secret window?
+  C. Does it matter how fast they disclose? (lag buckets — House only)
+  D. Buys vs sells — the asymmetry
+  E. Who has the edge? (two member rankings + scatter)
+  F. How long do they hold? (holding-period histogram)
+  G. Does our committee-conflict flag predict alpha?
+  H. How to read tomorrow's alert (decision card)
 
-Run:  python dashboard.py [--input data/backtest.csv] [--out data/dashboard.html]
+Inputs:
+  data/backtest.csv         — Senate (assumed 30-day disclosure lag)
+  data/backtest_house.csv   — House (real disclosure dates)
+  data/cache/house_historical.json — for holding-period analysis
 
-The dashboard re-applies the current conflict matrix (src/conflicts.py) to every
-historical trade, so editing the matrix and re-running the dashboard immediately
-shows whether the change tightens or loosens the historical signal.
+Re-run after editing src/conflicts.py to see whether the matrix change
+tightens or loosens the historical signal.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-from datetime import datetime
-from typing import List
+from datetime import date, datetime, timedelta
+from typing import List, Optional
 
 import pandas as pd
 import plotly.express as px
@@ -32,20 +38,29 @@ from src.committees import lookup_committees
 from src.conflicts import detect_conflict
 from src.sectors import lookup_sector
 
+FLAG_COLOR = {"high": "#dc2626", "moderate": "#ea580c", "low": "#ca8a04", "none": "#9ca3af"}
+FLAG_LABEL = {
+    "high": "Strong match",
+    "moderate": "Some match",
+    "low": "Weak match",
+    "none": "No match",
+}
+FLAG_ORDER = ["high", "moderate", "low", "none"]
 
-SEVERITY_COLOR = {"high": "#dc2626", "moderate": "#ea580c", "low": "#ca8a04", "none": "#9ca3af"}
-SEVERITY_ORDER = ["high", "moderate", "low", "none"]
 
+# ──────────────────────────────────────────────────────────────
+# Loading + enrichment
+# ──────────────────────────────────────────────────────────────
 
-def _load(path: str) -> pd.DataFrame:
+def _load_csv(path: str, source: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame()
     df = pd.read_csv(path)
-    num_cols = [
-        "direction", "lag_days",
-        "price_trade", "price_disclose", "price_disclose_30",
-        "price_disclose_90", "price_today",
-        "ret_during_gap_pct", "ret_post_30_pct", "ret_post_90_pct",
-        "ret_to_today_pct", "captured_share_pct",
-    ]
+    df["source"] = source
+    num_cols = ["direction", "lag_days", "price_trade", "price_disclose",
+                "price_disclose_30", "price_disclose_90", "price_today",
+                "ret_during_gap_pct", "ret_post_30_pct", "ret_post_90_pct",
+                "ret_to_today_pct", "captured_share_pct"]
     for c in num_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -54,385 +69,542 @@ def _load(path: str) -> pd.DataFrame:
     return df
 
 
-def _enrich_with_conflict(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply the current conflict matrix retroactively to every backtested row.
-
-    Note: uses *current* committee assignments (not historical), so a member
-    who served on a different committee at trade time will be misclassified.
-    Treat this as a directional signal, not a precise one.
-    """
-    print("Enriching with committee + sector + conflict severity…", flush=True)
-    sectors = {}
-    industries = {}
-    severities = []
-    for tk in df["ticker"].fillna("").unique():
-        if not tk:
-            continue
+def _enrich_conflict(df: pd.DataFrame) -> pd.DataFrame:
+    """Add sector + committee-conflict flag to every row."""
+    print(f"  enriching {len(df):,} rows with sector + committee flag…", flush=True)
+    sectors, industries = {}, {}
+    for tk in df["ticker"].dropna().unique():
         s, i = lookup_sector(tk)
         sectors[tk] = s
         industries[tk] = i
-    df["sector"] = df["ticker"].map(lambda t: sectors.get(t, ""))
-    df["industry"] = df["ticker"].map(lambda t: industries.get(t, ""))
-
-    member_cache = {}
-    for name in df["member"].unique():
-        member_cache[name] = lookup_committees(name)
-
-    for _, row in df.iterrows():
-        comms = member_cache.get(row["member"], [])
-        sev, _ = detect_conflict(comms, row["sector"] or "", row["industry"] or "")
-        severities.append(sev)
-    df["severity"] = severities
+    df["sector"] = df["ticker"].map(lambda t: sectors.get(t, "") if isinstance(t, str) else "")
+    df["industry"] = df["ticker"].map(lambda t: industries.get(t, "") if isinstance(t, str) else "")
+    member_cache = {n: lookup_committees(n) for n in df["member"].dropna().unique()}
+    df["flag"] = df.apply(
+        lambda r: detect_conflict(member_cache.get(r["member"], []),
+                                  r["sector"] or "", r["industry"] or "")[0],
+        axis=1,
+    )
     return df
 
 
-# ─────────────────────────────────────────────────────────────────
-# Page helpers
-# ─────────────────────────────────────────────────────────────────
+def _holding_periods() -> pd.DataFrame:
+    """Compute holding periods from data/cache/house_historical.json.
 
-def kpi_card(label: str, value: str, sub: str = "", color: str = "#111") -> str:
-    return f"""
-    <div style="border:1px solid #e5e7eb;border-radius:8px;padding:16px 22px;min-width:180px;background:#fafafa">
-      <div style="color:#6b7280;font-size:12px;text-transform:uppercase;letter-spacing:0.05em">{label}</div>
-      <div style="font-size:26px;font-weight:600;color:{color};margin-top:4px">{value}</div>
-      <div style="color:#6b7280;font-size:12px;margin-top:2px">{sub}</div>
+    For each purchase, find the earliest subsequent sale of the same ticker by
+    the same member. If found, record days_held + return; if not, mark Open.
+    """
+    path = "data/cache/house_historical.json"
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    with open(path) as f:
+        trades = json.load(f)
+    by_key: dict = {}
+    for t in trades:
+        if not t.get("ticker") or not t.get("transaction_date"):
+            continue
+        key = (t["member"].lower().strip(), t["ticker"].upper())
+        by_key.setdefault(key, []).append(t)
+    for k in by_key:
+        by_key[k].sort(key=lambda x: x["transaction_date"])
+
+    rows = []
+    for key, ts in by_key.items():
+        for i, t in enumerate(ts):
+            if "urchase" not in t["transaction_type"].lower():
+                continue
+            sale = next(
+                (s for s in ts[i + 1:] if "ale" in s["transaction_type"].lower()), None
+            )
+            if sale:
+                tx = datetime.strptime(t["transaction_date"], "%Y-%m-%d").date()
+                sx = datetime.strptime(sale["transaction_date"], "%Y-%m-%d").date()
+                rows.append({
+                    "member": t["member"],
+                    "ticker": t["ticker"],
+                    "purchase_date": tx,
+                    "sale_date": sx,
+                    "days_held": (sx - tx).days,
+                    "status": "closed",
+                })
+            else:
+                tx = datetime.strptime(t["transaction_date"], "%Y-%m-%d").date()
+                rows.append({
+                    "member": t["member"],
+                    "ticker": t["ticker"],
+                    "purchase_date": tx,
+                    "sale_date": None,
+                    "days_held": (date.today() - tx).days,
+                    "status": "open",
+                })
+    return pd.DataFrame(rows)
+
+
+# ──────────────────────────────────────────────────────────────
+# Page parts
+# ──────────────────────────────────────────────────────────────
+
+def _running_example_card(df: pd.DataFrame) -> tuple[str, dict]:
+    """Pick a vivid recent House trade to use as the running example.
+
+    Criteria:
+      - House (real dates)
+      - lag between 14 and 30 days (typical, not extreme)
+      - strong absolute gap move (>10%)
+      - direction matched the move (it was a "right" call)
+      - traded in the last 12 months for recency
+    """
+    house = df[(df["source"] == "house") & df["ret_during_gap_pct"].notna()].copy()
+    house = house[(house["lag_days"] >= 14) & (house["lag_days"] <= 30)]
+    house = house[house["ret_during_gap_pct"] > 10]
+    cutoff = pd.Timestamp(date.today() - timedelta(days=365 * 2))
+    house = house[house["trade_date"] >= cutoff]
+    if house.empty:
+        # fall back to any strong gap move
+        house = df[df["ret_during_gap_pct"].notna() & (df["ret_during_gap_pct"] > 10)]
+    if house.empty:
+        return "<p>No example available.</p>", {}
+    ex = house.sort_values("ret_during_gap_pct", ascending=False).iloc[0]
+
+    side = "bought" if ex["direction"] == 1 else "sold"
+    sign = "rose" if ex["direction"] == 1 else "fell"
+    gap_abs = abs(ex["ret_during_gap_pct"])
+    post = ex["ret_post_30_pct"] if pd.notna(ex["ret_post_30_pct"]) else float("nan")
+    post_str = f"{post:+.1f}%" if pd.notna(post) else "?"
+
+    html = f"""
+    <div style="border:1px solid #e5e7eb;border-radius:10px;padding:18px 22px;background:#fafbfc;margin:12px 0">
+      <div style="color:#6b7280;font-size:12px;text-transform:uppercase;letter-spacing:0.06em">Running example</div>
+      <div style="font-size:18px;font-weight:600;margin-top:6px">{ex['member']} {side} <span style='font-family:monospace'>{ex['ticker']}</span></div>
+      <div style="margin-top:8px;line-height:1.7;color:#374151">
+        Traded <strong>{ex['trade_date'].date()}</strong> at <strong>${ex['price_trade']:.2f}</strong>.
+        Disclosed <strong>{ex['disclosure_date'].date()}</strong> ({int(ex['lag_days'])} days later) — by then the stock was
+        <strong>${ex['price_disclose']:.2f}</strong>, having {sign} <strong>{gap_abs:.1f}%</strong> in the secret window.
+        In the 30 days after disclosure, anyone copying the trade would have made <strong>{post_str}</strong> more.
+      </div>
+      <div style="margin-top:8px;color:#6b7280;font-size:13px">
+        We'll use this trade as a touchstone. Every chart below asks: <em>is this typical or is this unusual?</em>
+      </div>
     </div>
     """
+    return html, ex.to_dict()
 
 
-def kpi_row(cards: List[str]) -> str:
-    return f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:12px 0'>{''.join(cards)}</div>"
-
-
-def section(title: str, claim: str, chart_html: str, narrative: str = "") -> str:
-    return f"""
-    <h2 style="margin-top:36px;border-top:1px solid #e5e7eb;padding-top:18px">{title}</h2>
-    <p style="color:#111;font-size:16px;margin-top:4px"><strong>{claim}</strong></p>
-    <div style="margin-top:8px">{chart_html}</div>
-    {f'<p style="color:#374151;font-size:14px;line-height:1.55">{narrative}</p>' if narrative else ''}
-    """
-
-
-# ─────────────────────────────────────────────────────────────────
-# Charts
-# ─────────────────────────────────────────────────────────────────
-
-def headline_kpis(df: pd.DataFrame) -> str:
+def _kpi_strip(df: pd.DataFrame) -> str:
     valid = df.dropna(subset=["ret_during_gap_pct", "ret_post_30_pct"])
     g = valid["ret_during_gap_pct"].mean()
     p = valid["ret_post_30_pct"].mean()
-    share = g / (g + p) * 100 if (g + p) != 0 else float("nan")
-    n_high = (df["severity"] == "high").sum()
+    n_house = (df["source"] == "house").sum()
+    n_senate = (df["source"] == "senate").sum()
     cards = [
-        kpi_card("Trades backtested", f"{len(valid):,}", "purchases + sales, valid pricing"),
-        kpi_card("Mean insider-window gain", f"{g:+.2f}%", "direction-adjusted, trade → disclosure (~30d)",
-                 color="#dc2626"),
-        kpi_card("Left for a follower", f"{p:+.2f}%", "disclosure → +30d",
-                 color="#2563eb"),
-        kpi_card("Capture share", f"{share:.0f}%", "of the 30-day move already gone by disclosure",
-                 color="#111"),
-        kpi_card("Flagged historically", f"{n_high:,}", "trades with 🔴 high committee conflict",
-                 color="#dc2626"),
+        ("Trades analyzed", f"{len(valid):,}",
+         f"{n_house:,} House (real disclosure dates) · {n_senate:,} Senate (assumed 30d lag)"),
+        ("Average move during secret window", f"{g:+.2f}%",
+         "What members had already 'earned' before the public could see"),
+        ("Average move available after disclosure", f"{p:+.2f}%",
+         "What's left if you copy the trade once it's public"),
+        ("Share of the move already captured", f"{g/(g+p)*100:.0f}%" if (g + p) != 0 else "—",
+         "Before the public knew, this much of the 30-day move was done"),
     ]
-    return kpi_row(cards)
+    body = "".join(f"""
+        <div style="flex:1;min-width:200px;border:1px solid #e5e7eb;border-radius:8px;padding:14px 18px;background:#fafafa">
+          <div style="color:#6b7280;font-size:11px;text-transform:uppercase;letter-spacing:0.05em">{label}</div>
+          <div style="font-size:24px;font-weight:600;margin-top:4px">{value}</div>
+          <div style="color:#6b7280;font-size:12px;margin-top:4px;line-height:1.4">{sub}</div>
+        </div>
+    """ for label, value, sub in cards)
+    return f'<div style="display:flex;gap:12px;flex-wrap:wrap;margin:14px 0">{body}</div>'
 
 
-def chart_horizons(df: pd.DataFrame) -> str:
+def _chart_horizons(df: pd.DataFrame) -> str:
     valid = df.dropna(subset=["ret_during_gap_pct", "ret_post_30_pct", "ret_post_90_pct"])
     g = valid["ret_during_gap_pct"].mean()
     p30 = valid["ret_post_30_pct"].mean()
     p90 = valid["ret_post_90_pct"].mean()
     fig = go.Figure(go.Bar(
-        x=["During gap (insider)", "+30d after disclosure", "+90d after disclosure"],
+        x=["During the secret window", "30 days after public disclosure", "90 days after public disclosure"],
         y=[g, p30, p90],
-        marker_color=["#dc2626", "#2563eb", "#4b5563"],
+        marker_color=["#dc2626", "#2563eb", "#94a3b8"],
         text=[f"{v:+.2f}%" for v in [g, p30, p90]],
         textposition="outside",
     ))
-    fig.update_layout(yaxis_title="Mean return (%)", height=360, margin=dict(t=30, l=40, r=20, b=40))
+    fig.update_layout(
+        yaxis_title="Average % the stock moved (the senator/rep's direction)",
+        height=380, margin=dict(t=30, l=40, r=20, b=80),
+    )
     return fig.to_html(include_plotlyjs="cdn", full_html=False, div_id="c-horizons")
 
 
-def chart_purchases_vs_sales(df: pd.DataFrame) -> str:
+def _chart_lag_buckets(df: pd.DataFrame) -> str:
+    house = df[df["source"] == "house"].dropna(subset=["ret_during_gap_pct", "ret_post_30_pct", "lag_days"]).copy()
+    if house.empty:
+        return "<p style='color:#6b7280'>House backtest data not available — re-run <code>python backtest_house.py</code>.</p>"
+    bins = [(0, 10), (10, 20), (20, 30), (30, 45), (45, 1000)]
+    labels = ["<10 days", "10–20 days", "20–30 days", "30–45 days", "Late (>45 days)"]
+    rows = []
+    for (lo, hi), lab in zip(bins, labels):
+        bucket = house[(house["lag_days"] >= lo) & (house["lag_days"] < hi)]
+        if bucket.empty:
+            continue
+        g = bucket["ret_during_gap_pct"].mean()
+        p = bucket["ret_post_30_pct"].mean()
+        rows.append({"bucket": lab, "n": len(bucket), "gap": g, "post": p})
+    if not rows:
+        return "<p>No data.</p>"
+    d = pd.DataFrame(rows)
+    fig = go.Figure()
+    fig.add_bar(
+        name="Move during the secret window",
+        x=d["bucket"], y=d["gap"], marker_color="#dc2626",
+        text=[f"{v:+.1f}%<br>n={n:,}" for v, n in zip(d["gap"], d["n"])],
+        textposition="outside",
+    )
+    fig.add_bar(
+        name="Move 30d after public disclosure",
+        x=d["bucket"], y=d["post"], marker_color="#2563eb",
+        text=[f"{v:+.1f}%" for v in d["post"]],
+        textposition="outside",
+    )
+    fig.update_layout(
+        yaxis_title="Average % the stock moved (the trader's direction)",
+        barmode="group", height=420,
+        legend=dict(orientation="h", y=-0.20),
+        margin=dict(t=30, l=40, r=20, b=80),
+    )
+    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-lag")
+
+
+def _chart_buys_vs_sells(df: pd.DataFrame) -> str:
     valid = df.dropna(subset=["ret_during_gap_pct", "ret_post_30_pct"]).copy()
-    valid["side"] = valid["direction"].map({1: "Purchases", -1: "Sales"})
+    valid["side"] = valid["direction"].map({1: "Buys (purchases)", -1: "Sells"})
     g = valid.groupby("side").agg(
         n=("ret_during_gap_pct", "size"),
         gap=("ret_during_gap_pct", "mean"),
         post=("ret_post_30_pct", "mean"),
     ).reset_index()
     fig = go.Figure()
-    fig.add_bar(name="Gap (insider)", x=g["side"], y=g["gap"], marker_color="#dc2626",
-                text=[f"{v:+.2f}%" for v in g["gap"]], textposition="outside")
-    fig.add_bar(name="Post-disclosure 30d", x=g["side"], y=g["post"], marker_color="#2563eb",
-                text=[f"{v:+.2f}%" for v in g["post"]], textposition="outside")
-    fig.update_layout(yaxis_title="Mean return (%)", barmode="group",
-                      height=380, margin=dict(t=30, l=40, r=20, b=40),
-                      legend=dict(orientation="h", y=-0.18))
+    fig.add_bar(name="Move during the secret window", x=g["side"], y=g["gap"],
+                marker_color="#dc2626",
+                text=[f"{v:+.2f}%<br>(n={n:,})" for v, n in zip(g["gap"], g["n"])],
+                textposition="outside")
+    fig.add_bar(name="Move 30d after disclosure", x=g["side"], y=g["post"],
+                marker_color="#2563eb",
+                text=[f"{v:+.2f}%" for v in g["post"]],
+                textposition="outside")
+    fig.update_layout(yaxis_title="Average % (trader's direction)",
+                      barmode="group", height=400,
+                      legend=dict(orientation="h", y=-0.18),
+                      margin=dict(t=30, l=40, r=20, b=40))
     return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-pvs")
 
 
-def chart_severity(df: pd.DataFrame) -> str:
-    """The money chart: does the conflict flag predict alpha?"""
-    valid = df.dropna(subset=["ret_during_gap_pct", "ret_post_30_pct"]).copy()
-    valid["severity"] = pd.Categorical(valid["severity"], SEVERITY_ORDER, ordered=True)
-    g = valid.groupby("severity", observed=True).agg(
-        n=("ret_during_gap_pct", "size"),
-        gap=("ret_during_gap_pct", "mean"),
-        post=("ret_post_30_pct", "mean"),
-    ).reset_index()
-    fig = go.Figure()
-    fig.add_bar(name="Gap (insider)", x=g["severity"], y=g["gap"],
-                marker_color=[SEVERITY_COLOR[s] for s in g["severity"]],
-                text=[f"{v:+.2f}%<br>n={n:,}" for v, n in zip(g["gap"], g["n"])], textposition="outside")
-    fig.add_bar(name="Post-disclosure 30d", x=g["severity"], y=g["post"],
-                marker_color=["#94a3b8"] * len(g),
-                text=[f"{v:+.2f}%" for v in g["post"]], textposition="outside")
-    fig.update_layout(yaxis_title="Mean return (%)", barmode="group",
-                      height=420, margin=dict(t=30, l=40, r=20, b=40),
-                      legend=dict(orientation="h", y=-0.18))
-    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-sev")
-
-
-def chart_severity_purchases(df: pd.DataFrame) -> str:
-    """Same as above, restricted to PURCHASES (where the signal lives)."""
-    valid = df[(df["direction"] == 1)].dropna(subset=["ret_during_gap_pct", "ret_post_30_pct"]).copy()
-    valid["severity"] = pd.Categorical(valid["severity"], SEVERITY_ORDER, ordered=True)
-    g = valid.groupby("severity", observed=True).agg(
-        n=("ret_during_gap_pct", "size"),
-        gap=("ret_during_gap_pct", "mean"),
-        post=("ret_post_30_pct", "mean"),
-    ).reset_index()
-    fig = go.Figure()
-    fig.add_bar(name="Gap (insider)", x=g["severity"], y=g["gap"],
-                marker_color=[SEVERITY_COLOR[s] for s in g["severity"]],
-                text=[f"{v:+.2f}%<br>n={n:,}" for v, n in zip(g["gap"], g["n"])], textposition="outside")
-    fig.add_bar(name="Post-disclosure 30d", x=g["severity"], y=g["post"],
-                marker_color=["#94a3b8"] * len(g),
-                text=[f"{v:+.2f}%" for v in g["post"]], textposition="outside")
-    fig.update_layout(yaxis_title="Mean return (%)", barmode="group",
-                      height=420, margin=dict(t=30, l=40, r=20, b=40),
-                      legend=dict(orientation="h", y=-0.18))
-    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-sev-p")
-
-
-def chart_members(df: pd.DataFrame, min_trades: int = 10) -> str:
-    purchases = df[(df["direction"] == 1)].dropna(subset=["ret_during_gap_pct"]).copy()
-    g = purchases.groupby("member").agg(
-        n=("ret_during_gap_pct", "size"),
-        mean_gap=("ret_during_gap_pct", "mean"),
-        mean_post=("ret_post_30_pct", "mean"),
-    ).reset_index()
-    g = g[g["n"] >= min_trades]
-    top = g.nlargest(10, "mean_gap")
-    bottom = g.nsmallest(10, "mean_gap")
-    combined = pd.concat([top, bottom]).drop_duplicates(subset=["member"])
-    combined = combined.sort_values("mean_gap")
-    fig = go.Figure()
-    fig.add_bar(
-        x=combined["mean_gap"],
-        y=combined["member"] + " (n=" + combined["n"].astype(str) + ")",
-        orientation="h",
-        marker_color=["#dc2626" if v > 0 else "#1d4ed8" for v in combined["mean_gap"]],
-        text=[f"{v:+.2f}%" for v in combined["mean_gap"]],
-        textposition="outside",
+def _chart_members_two_views(df: pd.DataFrame, min_trades: int = 10) -> str:
+    """Two side-by-side rankings: top by secret-window return, top by total return."""
+    buys = df[(df["direction"] == 1) & df["ret_during_gap_pct"].notna()].copy()
+    # Annualize ret_to_today_pct over years since trade
+    buys["years_since_trade"] = (pd.Timestamp(date.today()) - buys["trade_date"]).dt.days / 365.25
+    buys = buys[buys["years_since_trade"] > 0.25]
+    buys["annualized_total"] = buys.apply(
+        lambda r: ((1 + r["ret_to_today_pct"] / 100) ** (1 / r["years_since_trade"]) - 1) * 100
+        if pd.notna(r["ret_to_today_pct"]) else float("nan"),
+        axis=1,
     )
+    by_member = buys.groupby("member").agg(
+        n=("ret_during_gap_pct", "size"),
+        gap=("ret_during_gap_pct", "mean"),
+        ann=("annualized_total", "mean"),
+    ).reset_index()
+    by_member = by_member[by_member["n"] >= min_trades]
+    top_gap = by_member.nlargest(10, "gap").sort_values("gap")
+    top_total = by_member.nlargest(10, "ann").sort_values("ann")
+
+    fig = go.Figure()
+    fig.add_bar(name="Best timers (secret-window)",
+                x=top_gap["gap"],
+                y=top_gap["member"] + " (n=" + top_gap["n"].astype(str) + ")",
+                orientation="h", marker_color="#dc2626", xaxis="x1", yaxis="y1",
+                text=[f"{v:+.1f}%" for v in top_gap["gap"]], textposition="outside")
+    fig.add_bar(name="Best long-term picks (annualized)",
+                x=top_total["ann"],
+                y=top_total["member"] + " (n=" + top_total["n"].astype(str) + ")",
+                orientation="h", marker_color="#16a34a", xaxis="x2", yaxis="y2",
+                text=[f"{v:+.1f}%" for v in top_total["ann"]], textposition="outside")
     fig.update_layout(
-        xaxis_title="Mean gap return on purchases (%)",
-        height=560, margin=dict(t=30, l=240, r=40, b=40),
+        grid=dict(rows=1, columns=2, pattern="independent"),
+        height=520,
+        margin=dict(t=30, l=180, r=180, b=40),
+        showlegend=False,
+        xaxis=dict(title="Avg % in secret window", anchor="y1"),
+        yaxis=dict(domain=[0, 1], anchor="x1"),
+        xaxis2=dict(title="Avg annualized return to today", anchor="y2"),
+        yaxis2=dict(domain=[0, 1], anchor="x2"),
+        annotations=[
+            dict(text="<b>Best timers</b><br>biggest gains during secret window",
+                 x=0.0, y=1.10, xref="paper", yref="paper", showarrow=False, align="left"),
+            dict(text="<b>Best pickers</b><br>biggest long-term winners",
+                 x=0.60, y=1.10, xref="paper", yref="paper", showarrow=False, align="left"),
+        ],
     )
     return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-members")
 
 
-def chart_sectors(df: pd.DataFrame, min_trades: int = 30) -> str:
-    purchases = df[(df["direction"] == 1) & df["sector"].notna() & (df["sector"] != "")].dropna(subset=["ret_during_gap_pct"]).copy()
-    g = purchases.groupby("sector").agg(
-        n=("ret_during_gap_pct", "size"),
-        mean_gap=("ret_during_gap_pct", "mean"),
-        mean_post=("ret_post_30_pct", "mean"),
-    ).reset_index()
-    g = g[g["n"] >= min_trades].sort_values("mean_gap", ascending=True)
-    fig = go.Figure()
-    fig.add_bar(name="Gap (insider)", x=g["mean_gap"], y=g["sector"], orientation="h",
-                marker_color="#dc2626",
-                text=[f"{v:+.2f}% (n={n})" for v, n in zip(g["mean_gap"], g["n"])],
-                textposition="outside")
-    fig.update_layout(
-        xaxis_title="Mean gap return on purchases (%)",
-        height=480, margin=dict(t=30, l=160, r=40, b=40),
+def _chart_member_scatter(df: pd.DataFrame, min_trades: int = 10) -> str:
+    buys = df[(df["direction"] == 1) & df["ret_during_gap_pct"].notna()].copy()
+    buys["years_since_trade"] = (pd.Timestamp(date.today()) - buys["trade_date"]).dt.days / 365.25
+    buys = buys[buys["years_since_trade"] > 0.25]
+    buys["annualized_total"] = buys.apply(
+        lambda r: ((1 + r["ret_to_today_pct"] / 100) ** (1 / r["years_since_trade"]) - 1) * 100
+        if pd.notna(r["ret_to_today_pct"]) else float("nan"),
+        axis=1,
     )
-    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-sectors")
+    by_member = buys.groupby("member").agg(
+        n=("ret_during_gap_pct", "size"),
+        gap=("ret_during_gap_pct", "mean"),
+        ann=("annualized_total", "mean"),
+    ).reset_index()
+    by_member = by_member[by_member["n"] >= min_trades]
+    fig = px.scatter(
+        by_member, x="gap", y="ann", size="n", hover_name="member",
+        labels={"gap": "Avg move in secret window (%)",
+                "ann": "Avg annualized return to today (%)"},
+    )
+    fig.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+    fig.add_vline(x=0, line_dash="dot", line_color="#9ca3af")
+    fig.update_traces(marker=dict(color="#1d4ed8", opacity=0.6))
+    fig.update_layout(
+        height=500, margin=dict(t=30, l=40, r=20, b=40),
+        annotations=[
+            dict(text="Right side = good timer · Top side = good picker · Top-right = both",
+                 x=0.5, y=1.06, xref="paper", yref="paper", showarrow=False,
+                 font=dict(size=12, color="#6b7280")),
+        ],
+    )
+    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-scatter")
 
 
-def chart_severity_breakdown(df: pd.DataFrame) -> str:
-    counts = df["severity"].value_counts().reindex(SEVERITY_ORDER, fill_value=0)
-    fig = go.Figure(go.Bar(
-        x=[s.title() for s in counts.index],
-        y=counts.values,
-        marker_color=[SEVERITY_COLOR[s] for s in counts.index],
-        text=[f"{v:,}" for v in counts.values],
-        textposition="outside",
-    ))
-    fig.update_layout(yaxis_title="Trades", height=340, margin=dict(t=30, l=40, r=20, b=40))
-    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-sev-bd")
+def _chart_holding(holding: pd.DataFrame) -> str:
+    if holding.empty:
+        return "<p style='color:#6b7280'>Need the historical House cache. Run <code>python backfill_house.py</code>.</p>"
+    closed = holding[holding["status"] == "closed"]
+    n_open = (holding["status"] == "open").sum()
+    n_total = len(holding)
+    pct_open = n_open / n_total * 100
+    if closed.empty:
+        return f"<p>{n_open:,} of {n_total:,} disclosed purchases are still open ({pct_open:.0f}%); no closed positions found.</p>"
+    fig = px.histogram(
+        closed, x="days_held", nbins=40,
+        labels={"days_held": "Days from purchase to disclosed sale"},
+    )
+    fig.update_traces(marker=dict(color="#1d4ed8"))
+    median_held = closed["days_held"].median()
+    fig.update_layout(height=380, margin=dict(t=30, l=40, r=20, b=40),
+                      yaxis_title="Number of trades",
+                      title_text=(f"Among CLOSED positions: median holding period {int(median_held)} days. "
+                                  f"{n_open:,} of {n_total:,} purchases ({pct_open:.0f}%) are still open."))
+    fig.add_vline(x=median_held, line_dash="dash", line_color="#dc2626",
+                  annotation_text=f"median = {int(median_held)}d", annotation_position="top")
+    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-holding")
 
 
-def chart_cumulative(df: pd.DataFrame) -> str:
-    purchases = df[(df["direction"] == 1) & df["ret_during_gap_pct"].notna() & df["ret_post_30_pct"].notna()].copy()
-    purchases = purchases.sort_values("trade_date")
-    purchases["cum_insider"] = ((1 + (purchases["ret_during_gap_pct"] + purchases["ret_post_30_pct"]) / 100).cumprod() - 1) * 100
-    purchases["cum_follower"] = ((1 + purchases["ret_post_30_pct"] / 100).cumprod() - 1) * 100
+def _chart_flag_predicts_alpha(df: pd.DataFrame) -> str:
+    buys = df[df["direction"] == 1].dropna(subset=["ret_during_gap_pct", "ret_post_30_pct"]).copy()
+    buys["flag"] = pd.Categorical(buys["flag"], FLAG_ORDER, ordered=True)
+    g = buys.groupby("flag", observed=True).agg(
+        n=("ret_during_gap_pct", "size"),
+        gap=("ret_during_gap_pct", "mean"),
+        post=("ret_post_30_pct", "mean"),
+    ).reset_index()
+    g["flag_label"] = g["flag"].map(FLAG_LABEL)
     fig = go.Figure()
-    fig.add_scatter(x=purchases["trade_date"], y=purchases["cum_insider"], mode="lines",
-                    name="Insider (entered at trade date)", line=dict(color="#dc2626", width=1.5))
-    fig.add_scatter(x=purchases["trade_date"], y=purchases["cum_follower"], mode="lines",
-                    name="Follower (entered at disclosure)", line=dict(color="#2563eb", width=1.5))
-    fig.update_layout(yaxis_title="Cumulative return (%, equal-weighted)", xaxis_title="Trade date",
-                      height=440, margin=dict(t=30, l=40, r=20, b=40),
-                      legend=dict(orientation="h", y=-0.18))
-    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-cum")
+    fig.add_bar(name="Move in secret window",
+                x=g["flag_label"], y=g["gap"],
+                marker_color=[FLAG_COLOR[s] for s in g["flag"]],
+                text=[f"{v:+.2f}%<br>(n={n:,})" for v, n in zip(g["gap"], g["n"])],
+                textposition="outside")
+    fig.add_bar(name="Move 30d after disclosure",
+                x=g["flag_label"], y=g["post"],
+                marker_color="#94a3b8",
+                text=[f"{v:+.2f}%" for v in g["post"]],
+                textposition="outside")
+    fig.update_layout(yaxis_title="Average %", barmode="group", height=420,
+                      legend=dict(orientation="h", y=-0.18),
+                      margin=dict(t=30, l=40, r=20, b=40))
+    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-flag")
 
 
-# ─────────────────────────────────────────────────────────────────
-# Render
-# ─────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# Page
+# ──────────────────────────────────────────────────────────────
 
-def render(df: pd.DataFrame) -> str:
+def _section(num: str, title: str, claim: str, chart: str, narrative: str) -> str:
+    return f"""
+    <h2 style="margin-top:36px;border-top:1px solid #e5e7eb;padding-top:18px">{num}. {title}</h2>
+    <p style="color:#111;font-size:17px;margin-top:4px"><strong>{claim}</strong></p>
+    <div style="margin-top:12px">{chart}</div>
+    <p style="color:#374151;font-size:14px;line-height:1.6;margin-top:14px">{narrative}</p>
+    """
+
+
+def render(df: pd.DataFrame, holding: pd.DataFrame) -> str:
     valid = df.dropna(subset=["ret_during_gap_pct", "ret_post_30_pct"])
-    n = len(valid)
     g = valid["ret_during_gap_pct"].mean()
     p = valid["ret_post_30_pct"].mean()
     share = g / (g + p) * 100 if (g + p) != 0 else float("nan")
 
-    purchases = valid[valid["direction"] == 1]
-    sales = valid[valid["direction"] == -1]
+    example_html, ex = _running_example_card(df)
+    example_member = ex.get("member", "the example trader")
+    example_ticker = ex.get("ticker", "X")
+    example_gap = ex.get("ret_during_gap_pct", float("nan"))
+    example_lag = int(ex.get("lag_days", 0)) if pd.notna(ex.get("lag_days", float("nan"))) else 0
 
-    # Severity comparison on purchases only (where signal lives)
-    pp = purchases.dropna(subset=["ret_during_gap_pct"]).copy()
-    pp["severity"] = pd.Categorical(pp["severity"], SEVERITY_ORDER, ordered=True)
-    sev_means = pp.groupby("severity", observed=True)["ret_during_gap_pct"].agg(["mean", "size"])
-    high_mean = sev_means.loc["high", "mean"] if "high" in sev_means.index else float("nan")
-    none_mean = sev_means.loc["none", "mean"] if "none" in sev_means.index else float("nan")
-    sev_delta = high_mean - none_mean
+    # numbers used inside narratives
+    buys = valid[valid["direction"] == 1]
+    sells = valid[valid["direction"] == -1]
+    buys_gap = buys["ret_during_gap_pct"].mean() if not buys.empty else float("nan")
+    sells_gap = sells["ret_during_gap_pct"].mean() if not sells.empty else float("nan")
+
+    high_mean = float("nan")
+    none_mean = float("nan")
+    bb = buys.copy()
+    bb["flag"] = pd.Categorical(bb["flag"], FLAG_ORDER, ordered=True)
+    by_flag = bb.groupby("flag", observed=True)["ret_during_gap_pct"].mean()
+    if "high" in by_flag.index:
+        high_mean = by_flag["high"]
+    if "none" in by_flag.index:
+        none_mean = by_flag["none"]
 
     return f"""<!doctype html>
 <html><head>
   <meta charset="utf-8">
-  <title>Congress Trades — Backtest Dashboard</title>
+  <title>What congress is doing with their stocks</title>
   <style>
-    body {{ font-family:-apple-system,Helvetica,Arial,sans-serif; color:#111; max-width:1200px; margin:24px auto; padding:0 20px }}
-    h1 {{ margin-bottom:0; font-size:30px }}
+    body {{ font-family:-apple-system,Helvetica,Arial,sans-serif; color:#111;
+            max-width:1100px; margin:24px auto; padding:0 22px }}
+    h1 {{ margin-bottom:0; font-size:32px }}
     h2 {{ font-size:22px }}
-    .subtitle {{ color:#6b7280; font-size:14px; margin-top:6px }}
-    .lede {{ font-size:17px; color:#111; margin:18px 0; padding:14px 18px;
-            background:#fef2f2; border-left:4px solid #dc2626; border-radius:4px; line-height:1.55 }}
-    code {{ background:#f3f4f6; padding:1px 5px; border-radius:3px; font-size:13px }}
+    .subtitle {{ color:#6b7280; font-size:14px; margin-top:6px; line-height:1.55 }}
+    .lede {{ font-size:17px; line-height:1.65; margin:20px 0; padding:16px 20px;
+            background:#fef2f2; border-left:4px solid #dc2626; border-radius:4px }}
+    code {{ background:#f3f4f6; padding:1px 6px; border-radius:3px; font-size:13px }}
+    .vocab {{ background:#f9fafb; border:1px solid #e5e7eb; border-radius:8px;
+              padding:14px 18px; margin:14px 0; font-size:14px; line-height:1.65 }}
+    .vocab strong {{ color:#111 }}
   </style>
 </head><body>
 
-  <h1>Congress trades — backtest dashboard</h1>
+  <h1>What congress is doing with their stocks</h1>
   <div class="subtitle">
     Generated {datetime.now().strftime("%Y-%m-%d %H:%M")} ·
-    {len(df):,} historical Senate trades ({n:,} with full pricing) ·
-    assumed disclosure lag 30d ·
-    all returns direction-adjusted (positive = right-direction call).
+    {len(df):,} trades analyzed
+    ({(df['source']=='house').sum():,} House with real disclosure dates,
+    {(df['source']=='senate').sum():,} Senate with assumed 30-day lag).
   </div>
 
   <div class="lede">
-    Across {n:,} backtested Senate trades, the typical trade gained <strong>{g:+.2f}%</strong> in the
-    insider window (trade → assumed disclosure, ~30 days) and a further <strong>{p:+.2f}%</strong> in
-    the 30 days <em>after</em> disclosure. <strong>{share:.0f}% of the 30-day move had already happened
-    by the time the public could see the trade.</strong> The chart below shows how to read every other
-    section.
+    When a senator or representative trades a stock, they have up to 45 days to tell the public.
+    During those 45 days, only they know the trade happened — the <strong>secret window</strong>.
+    Once disclosed, you can copy them. But if the stock has already moved during the secret window,
+    there may not be much left for you.
+    <br><br>
+    Across {len(valid):,} backtested trades, the average stock moved
+    <strong>{g:+.2f}%</strong> in the trader's direction during the secret window,
+    then a further <strong>{p:+.2f}%</strong> in the 30 days after disclosure.
+    By the time the public knew, <strong>{share:.0f}%</strong> of the 30-day move was already done.
+    <br><br>
+    But that's the average. The rest of this dashboard breaks it down by the things that matter:
+    how fast they disclosed, whether they were buying or selling, who they are, and
+    whether their committee oversees the industry.
   </div>
 
-  {headline_kpis(df)}
+  <div class="vocab">
+    <strong>Plain-English glossary</strong> (no jargon below this line):
+    <br>• <strong>Secret window</strong> = days between when they traded and when they had to tell the public.
+    <br>• <strong>Move in the secret window</strong> = how much the stock moved during those days, in the trader's favor.
+        If a senator bought at $100 and the stock was at $115 by the time they disclosed, that's a +15% move in the secret window.
+        If they sold at $100 and the stock was at $85 by disclosure, that's also +15% — they avoided a 15% loss.
+    <br>• <strong>Strong / weak / no committee match</strong> = whether the senator sits on a committee
+        whose work directly affects (strong), indirectly affects (weak), or doesn't affect (no) the stock's industry.
+  </div>
 
-  {section(
-    "1. The headline — what the data says",
-    f"Most of the move happens before you ever see the disclosure ({share:.0f}% of the 30-day window).",
-    chart_horizons(df),
-    "Each bar is the mean direction-adjusted return over a different window. "
-    f"Members captured <strong>{g:+.2f}%</strong> in the ~30 days from trade to disclosure. "
-    f"In the next 30 days a follower entering at disclosure would have made <strong>{p:+.2f}%</strong>. "
-    "The 90-day post-disclosure window mostly reverts back to baseline market drift — meaning the "
-    "edge is concentrated in a short pre-disclosure window.",
-  )}
+  {example_html}
+  {_kpi_strip(df)}
 
-  {section(
-    "2. The asymmetry — purchases vs sales",
-    "Purchases carry the signal. Sales are noise (often anti-signal).",
-    chart_purchases_vs_sales(df),
-    f"Of the {n:,} valid trades, {len(purchases):,} are purchases and {len(sales):,} are sales. "
-    "Purchases generate a positive direction-adjusted return both during the gap and after disclosure — "
-    "consistent with informed buying. Sales, by contrast, often go AGAINST the seller — stocks they "
-    "sold tend to keep rising. Implication: the daily alerter should weight purchases more heavily "
-    "than sales, and you should treat a 🔴 PURCHASE as a much stronger signal than a 🔴 SALE.",
-  )}
+  {_section("A", "How much does the stock move during the secret window?",
+            f"On average {g:+.2f}% — about {share:.0f}% of the eventual 30-day move had already happened by the time the public found out.",
+            _chart_horizons(df),
+            f"Each bar is the average % the stock moved in the trader's direction. "
+            f"Members 'capture' the {g:+.2f}% red bar before anyone else can see. After disclosure, "
+            f"a copycat trader has the {p:+.2f}% blue bar to work with. The 90-day bar shows that returns "
+            f"after disclosure mostly stabilize — the action is concentrated in the secret window. "
+            f"Our running example ({example_member}, {example_ticker}) had a "
+            f"{example_gap:+.1f}% move in {example_lag} days — well above the average.")}
 
-  {section(
-    "3. Does the committee-conflict flag predict alpha?",
-    f"Yes — {'modestly' if abs(sev_delta) < 1 else 'meaningfully'}. " + (
-        f"Historical 🔴 high-conflict purchases gained <strong>{high_mean:+.2f}%</strong> in the gap "
-        f"vs <strong>{none_mean:+.2f}%</strong> for unflagged purchases (a {sev_delta:+.2f}pp gap)."
-        if not pd.isna(sev_delta) else "Insufficient flagged trades in the sample to draw a conclusion."
-    ),
-    chart_severity_purchases(df),
-    "This is the headline question for the alerter: when a member trades a stock in their committee's "
-    "jurisdiction, do they outperform their other trades? The chart above shows mean returns broken "
-    "down by the severity the alerter would have assigned at the time. "
-    "<strong>Caveat:</strong> committee assignments are looked up as they exist TODAY, not at the time "
-    "of each historical trade — so a member who switched committees would be misclassified. "
-    "Treat this as directional evidence, not precise.",
-  )}
+  {_section("B", "Does it matter how fast they disclose?",
+            "Yes. The shorter the secret window, the less the stock has moved by disclosure — meaning more juice for a copycat.",
+            _chart_lag_buckets(df),
+            "Red bars are the move during the secret window; blue bars are what was left for a follower. "
+            "When you see a trade in your morning email with a short lag (under 20 days), more of the action is "
+            "still ahead. When the lag is close to 45 days, the stock has likely already moved — you're getting "
+            "the news late. Trades filed LATE (>45 days, illegal but common) show whether late-filers are systematically "
+            "different.")}
 
-  {section(
-    "4. Severity distribution — what alert volume looks like",
-    "What share of historical trades would have triggered an alert at each severity?",
-    chart_severity_breakdown(df),
-    "Most trades are unflagged (no committee/sector overlap). "
-    "When you receive a 🔴 alert tomorrow, this is the population it stands out from — "
-    "those don't fire every day, and when they do, the historical track record above tells you "
-    "what to expect.",
-  )}
+  {_section("C", "Buys vs sells — the asymmetry",
+            f"Buys carry signal ({buys_gap:+.2f}% average secret-window move). Sells are noise or anti-signal ({sells_gap:+.2f}%).",
+            _chart_buys_vs_sells(df),
+            "Sales happen for many reasons that have nothing to do with the stock — taxes, diversification, "
+            "estate planning, donations. Buys are deliberate. When a member <em>buys</em>, especially in a "
+            "stock their committee oversees, the historical evidence is much stronger that they know "
+            "something. Treat a 🔴 BUY in your morning email as a high-conviction signal; treat a 🔴 SELL with skepticism.")}
 
-  {section(
-    "5. Who has the edge — best and worst members",
-    "Members with the strongest (and weakest) historical gap returns on their purchases.",
-    chart_members(df, min_trades=10),
-    "Top 10 + bottom 10 senators by mean gap return on purchases (minimum 10 backtested trades). "
-    "Pay attention to the n= count — a high mean from 10 trades is much less robust than from 100. "
-    "When a member from the top of this list shows up in your alert tomorrow, that's a credibility boost; "
-    "a member from the bottom should be discounted.",
-  )}
+  {_section("D", "Who has the edge?",
+            "Best 'timers' (gain most in the secret window) and best 'pickers' (highest annualized long-term return) are often DIFFERENT people.",
+            _chart_members_two_views(df),
+            "Left: members whose purchases gained the most in the secret window — strongest evidence of well-timed entry. "
+            "Right: members whose purchases gained the most per year all-time — best long-term stock picks (luck, skill, or sustained inside info — can't tell which). "
+            "When a name from the LEFT chart appears in your alert, that's the strongest insider-timing signal. "
+            "From the RIGHT chart: high confidence they pick winners.")}
 
-  {section(
-    "6. Where the alpha is — by sector",
-    "Some sectors have systematically larger insider-window moves on congressional purchases.",
-    chart_sectors(df, min_trades=30),
-    "Sectors with ≥30 backtested purchases, ranked by mean gap return. "
-    "Concentrated alpha in a sector should make you more attentive when a member trades in it — "
-    "AND more attentive when the conflict matrix flags that sector.",
-  )}
+  <h2 style="margin-top:36px;border-top:1px solid #e5e7eb;padding-top:18px">E. Where each member sits on both dimensions</h2>
+  <p style="font-size:17px;margin-top:4px"><strong>The top-right quadrant — strong timing AND strong long-term picks — is where the highest-conviction names live.</strong></p>
+  <div>{_chart_member_scatter(df)}</div>
+  <p style="color:#374151;font-size:14px;line-height:1.6">
+    Each dot is one member with ≥10 backtested buys. X = average % move in the secret window.
+    Y = average annualized return to today. Size = number of trades.
+    <strong>Top-right</strong> = great timers AND great pickers (highest credibility).
+    <strong>Bottom-right</strong> = great timing but the stock then died — fast-money behavior.
+    <strong>Top-left</strong> = lucky long-term pickers, no insider signal.
+    <strong>Bottom-left</strong> = the laggards.
+  </p>
 
-  {section(
-    "7. Insider vs follower — cumulative",
-    "If you'd front-run every Senate disclosure (purchases only), you'd have made some of the move but missed the big chunk.",
-    chart_cumulative(df),
-    "Equity-curve view of the same fact. Red line = entered at trade date, exited at +30d "
-    "after disclosure (insider). Blue line = entered at disclosure, exited 30d later (follower). "
-    "Both are equal-weighted; this is illustrative, not a tradeable strategy.",
-  )}
+  {_section("F", "How long do they hold?",
+            "Most positions stay open. Among the ones we can see closed, the median holding period tells us how patient they are.",
+            _chart_holding(holding),
+            "This counts only purchases where we can find a matching disclosed sale later in the dataset. "
+            "Many positions are still open — either still held, or sold but not yet disclosed (they have up to 45 days). "
+            "A long median holding period means alpha extends well past your 30-day follower window — "
+            "the move probably continues if you hold longer. A short median means they're frequently in and out.")}
 
-  <h2 style="margin-top:40px;border-top:1px solid #e5e7eb;padding-top:18px">Reading the daily alert</h2>
-  <p style="font-size:14px;line-height:1.6;color:#374151">
-    When your morning email arrives, use this dashboard as the comparison set:
-    <ul style="font-size:14px;line-height:1.7;color:#374151">
-      <li>A 🔴 <strong>purchase</strong> in a sector from section 6's top stretch, by a member in section 5's top stretch, is the highest-confidence signal you can get.</li>
-      <li>A 🔴 <strong>sale</strong> is much less informative — sales as a category are anti-signal historically.</li>
-      <li>Unflagged trades (omitted from the email) sit in the gray bars of section 4 — they're noise by this matrix's lights.</li>
-      <li>If section 3's gap between 🔴 and ⚪ shrinks after a matrix edit, you've loosened too much. Aim for 🔴 mean returns at least 1pp above ⚪.</li>
-    </ul>
+  {_section("G", "Does our committee-conflict flag actually predict alpha?",
+            (f"Yes. Strong committee matches gained <strong>{high_mean:+.2f}%</strong> in the secret window vs <strong>{none_mean:+.2f}%</strong> for unflagged trades — a {(high_mean - none_mean):+.2f} percentage-point gap." if pd.notna(high_mean) and pd.notna(none_mean) else "Need more flagged trades in the sample."),
+            _chart_flag_predicts_alpha(df),
+            "Restricted to BUYS only (where the signal lives). If you edit <code>src/conflicts.py</code> and re-run "
+            "<code>python dashboard.py</code>, this chart tells you whether your change tightened or loosened the signal: "
+            "a wider gap between 🔴 and ⚪ is good. A narrower gap means you've loosened the rules and "
+            "let in noise. "
+            "Caveat: committee assignments are looked up as they exist TODAY, not at the time of each historical "
+            "trade — so a member who switched committees is misclassified.")}
+
+  <h2 style="margin-top:36px;border-top:1px solid #e5e7eb;padding-top:18px">H. How to read tomorrow's morning alert</h2>
+  <p style="font-size:17px;color:#111;margin-top:6px"><strong>A practical checklist for any trade in your email:</strong></p>
+  <ol style="font-size:15px;line-height:1.85;color:#1f2937">
+    <li><strong>Is it a buy?</strong> Buys carry signal; sells are mostly noise (section C).</li>
+    <li><strong>Was the lag short (<20 days)?</strong> If yes, more juice is still on the table (section B).</li>
+    <li><strong>Is there a 🔴 committee match?</strong> Strong matches outperform by {(high_mean - none_mean):+.1f}pp historically on buys (section G).</li>
+    <li><strong>Look up the member.</strong> Top-right of the scatter (section E) = highest credibility. Bottom-left = ignore.</li>
+    <li><strong>Is the position still open?</strong> If they're still holding, they probably expect more upside (section F).</li>
+  </ol>
+  <p style="color:#374151;font-size:14px;line-height:1.6">
+    No signal here is decisive on its own. The point of the daily alert is to surface trades worth a deeper look — this dashboard tells you which ones are statistically likeliest to matter.
   </p>
 
 </body></html>"""
@@ -440,18 +612,22 @@ def render(df: pd.DataFrame) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--input", default="data/backtest.csv")
+    p.add_argument("--senate", default="data/backtest.csv")
+    p.add_argument("--house", default="data/backtest_house.csv")
     p.add_argument("--out", default="data/dashboard.html")
     args = p.parse_args()
-    if not os.path.exists(args.input):
-        print(f"ERROR: {args.input} not found. Run `python backtest.py` first.", file=sys.stderr)
+    senate = _load_csv(args.senate, "senate")
+    house = _load_csv(args.house, "house")
+    df = pd.concat([senate, house], ignore_index=True)
+    if df.empty:
+        print("ERROR: no backtest data — run python backtest.py and/or python backtest_house.py first.", file=sys.stderr)
         return 1
-    df = _load(args.input)
-    df = _enrich_with_conflict(df)
-    html = render(df)
+    df = _enrich_conflict(df)
+    holding = _holding_periods()
+    html = render(df, holding)
     with open(args.out, "w") as f:
         f.write(html)
-    print(f"Wrote {args.out} ({len(html):,} chars, {len(df):,} rows)")
+    print(f"Wrote {args.out} ({len(html):,} chars; senate={len(senate):,}, house={len(house):,}, holding-records={len(holding):,})")
     return 0
 
 
