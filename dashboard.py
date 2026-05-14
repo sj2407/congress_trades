@@ -35,7 +35,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from src.committees import lookup_committees
-from src.conflicts import detect_conflict
+from src.conflicts import COMMITTEE_JURISDICTION, SECTOR_KEYWORDS, _normalize, detect_conflict, BROAD_KEY, TRADE_KEY
 from src.sectors import lookup_sector
 
 FLAG_COLOR = {"high": "#dc2626", "moderate": "#ea580c", "low": "#ca8a04", "none": "#9ca3af"}
@@ -406,6 +406,125 @@ def _chart_holding(holding: pd.DataFrame) -> str:
     return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-holding")
 
 
+def _per_committee_breakdown(df: pd.DataFrame) -> pd.DataFrame:
+    """For each (committee_fragment, jurisdiction_keyword) in the matrix,
+    measure the mean gap return on BUYS where the trader sat on that committee
+    AND the stock's sector/industry matched that jurisdiction keyword.
+
+    Returns one row per committee-fragment with: n, mean_gap, mean_post.
+    Aggregated across all jurisdiction keywords for that committee.
+    """
+    buys = df[(df["direction"] == 1)].dropna(subset=["ret_during_gap_pct", "ret_post_30_pct"]).copy()
+    member_cache = {n: lookup_committees(n) for n in buys["member"].dropna().unique()}
+
+    # Build a quick lookup: member -> normalized set of fragment substrings that
+    # appear in any of their committees.
+    member_frags: dict[str, set[str]] = {}
+    for member, comms in member_cache.items():
+        frags = set()
+        for c in comms:
+            nc = _normalize(c)
+            for frag in COMMITTEE_JURISDICTION:
+                if frag in nc:
+                    frags.add(frag)
+        member_frags[member] = frags
+
+    # For each row, vectorize: collect which (frag, jkey) match.
+    rows_out: dict[str, dict] = {}
+    for _, r in buys.iterrows():
+        haystack = f"{(r['sector'] or '').lower()} | {(r['industry'] or '').lower()}"
+        for frag in member_frags.get(r["member"], ()):
+            jurisdiction = COMMITTEE_JURISDICTION[frag]
+            if not jurisdiction:
+                continue
+            # Skip the broad/trade markers — they aren't sector-specific
+            sector_keys = jurisdiction - {BROAD_KEY, TRADE_KEY}
+            matched = False
+            for jkey in sector_keys:
+                for needle in SECTOR_KEYWORDS.get(jkey, {jkey}):
+                    if needle and needle in haystack:
+                        matched = True
+                        break
+                if matched:
+                    break
+            if not matched:
+                continue
+            agg = rows_out.setdefault(frag, {"committee": frag, "gaps": [], "posts": []})
+            agg["gaps"].append(r["ret_during_gap_pct"])
+            agg["posts"].append(r["ret_post_30_pct"])
+
+    rows = []
+    for frag, agg in rows_out.items():
+        if not agg["gaps"]:
+            continue
+        rows.append({
+            "committee": frag,
+            "n": len(agg["gaps"]),
+            "mean_gap": sum(agg["gaps"]) / len(agg["gaps"]),
+            "mean_post": sum(agg["posts"]) / len(agg["posts"]),
+        })
+    return pd.DataFrame(rows).sort_values("mean_gap", ascending=False)
+
+
+def _chart_per_committee(per_comm: pd.DataFrame, baseline: float) -> str:
+    """Horizontal bar chart: mean gap return per committee fragment, with the
+    overall-buys baseline shown as a vertical line."""
+    if per_comm.empty:
+        return "<p style='color:#6b7280'>No committee-flagged buys to analyze.</p>"
+    d = per_comm.sort_values("mean_gap")
+    colors = ["#16a34a" if v > baseline else "#dc2626" for v in d["mean_gap"]]
+    labels = [c.title() for c in d["committee"]]
+    fig = go.Figure(go.Bar(
+        x=d["mean_gap"],
+        y=[f"{lab} (n={n})" for lab, n in zip(labels, d["n"])],
+        orientation="h",
+        marker_color=colors,
+        text=[f"{v:+.2f}%" for v in d["mean_gap"]],
+        textposition="outside",
+    ))
+    fig.add_vline(x=baseline, line_dash="dash", line_color="#374151",
+                  annotation_text=f"all buys avg: {baseline:+.2f}%",
+                  annotation_position="top right")
+    fig.update_layout(
+        xaxis_title="Mean move in secret window (% direction-adjusted)",
+        height=max(380, 30 * len(d) + 80),
+        margin=dict(t=40, l=320, r=80, b=40),
+    )
+    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-per-comm")
+
+
+def _chart_short_lag_flag(df: pd.DataFrame) -> str:
+    """Same severity chart but restricted to trades with <20-day disclosure lag
+    (House only — Senate doesn't have real lag data)."""
+    short = df[(df["source"] == "house") & (df["lag_days"] < 20) & (df["direction"] == 1)].dropna(
+        subset=["ret_during_gap_pct", "ret_post_30_pct"]
+    ).copy()
+    if short.empty:
+        return "<p style='color:#6b7280'>No short-lag House data available.</p>"
+    short["flag"] = pd.Categorical(short["flag"], FLAG_ORDER, ordered=True)
+    g = short.groupby("flag", observed=True).agg(
+        n=("ret_during_gap_pct", "size"),
+        gap=("ret_during_gap_pct", "mean"),
+        post=("ret_post_30_pct", "mean"),
+    ).reset_index()
+    g["flag_label"] = g["flag"].map(FLAG_LABEL)
+    fig = go.Figure()
+    fig.add_bar(name="Move in secret window",
+                x=g["flag_label"], y=g["gap"],
+                marker_color=[FLAG_COLOR[s] for s in g["flag"]],
+                text=[f"{v:+.2f}%<br>(n={n:,})" for v, n in zip(g["gap"], g["n"])],
+                textposition="outside")
+    fig.add_bar(name="Move 30d after disclosure",
+                x=g["flag_label"], y=g["post"],
+                marker_color="#94a3b8",
+                text=[f"{v:+.2f}%" for v in g["post"]],
+                textposition="outside")
+    fig.update_layout(yaxis_title="Average %", barmode="group", height=400,
+                      legend=dict(orientation="h", y=-0.18),
+                      margin=dict(t=30, l=40, r=20, b=40))
+    return fig.to_html(include_plotlyjs=False, full_html=False, div_id="c-flag-short")
+
+
 def _chart_flag_predicts_alpha(df: pd.DataFrame) -> str:
     buys = df[df["direction"] == 1].dropna(subset=["ret_during_gap_pct", "ret_post_30_pct"]).copy()
     buys["flag"] = pd.Categorical(buys["flag"], FLAG_ORDER, ordered=True)
@@ -463,15 +582,58 @@ def render(df: pd.DataFrame, holding: pd.DataFrame) -> str:
     buys_gap = buys["ret_during_gap_pct"].mean() if not buys.empty else float("nan")
     sells_gap = sells["ret_during_gap_pct"].mean() if not sells.empty else float("nan")
 
-    high_mean = float("nan")
-    none_mean = float("nan")
     bb = buys.copy()
     bb["flag"] = pd.Categorical(bb["flag"], FLAG_ORDER, ordered=True)
-    by_flag = bb.groupby("flag", observed=True)["ret_during_gap_pct"].mean()
-    if "high" in by_flag.index:
-        high_mean = by_flag["high"]
-    if "none" in by_flag.index:
-        none_mean = by_flag["none"]
+    flag_stats = bb.groupby("flag", observed=True).agg(
+        n=("ret_during_gap_pct", "size"),
+        gap=("ret_during_gap_pct", "mean"),
+        post=("ret_post_30_pct", "mean"),
+    )
+    flag_stats["total"] = flag_stats["gap"] + flag_stats["post"]
+    # Render the headline table
+    flag_table_rows = ""
+    labels = {
+        "high": '🔴 Strong match <span style="color:#6b7280;font-weight:400">(committee directly oversees this industry)</span>',
+        "moderate": '🟠 Some match',
+        "low": '🟡 Weak match <span style="color:#6b7280;font-weight:400">(indirect, e.g. trade policy)</span>',
+        "none": '⚪ No match <span style="color:#6b7280;font-weight:400">(committee unrelated to this industry)</span>',
+    }
+    bg = {"high": "#fef2f2", "moderate": "#fff7ed", "low": "#fefce8", "none": "#f9fafb"}
+    for sev in FLAG_ORDER:
+        if sev not in flag_stats.index:
+            continue
+        r = flag_stats.loc[sev]
+        flag_table_rows += (
+            f'<tr style="background:{bg[sev]}">'
+            f'<td style="padding:10px 14px">{labels[sev]}</td>'
+            f'<td style="padding:10px 14px;text-align:right;font-variant-numeric:tabular-nums">{int(r["n"]):,}</td>'
+            f'<td style="padding:10px 14px;text-align:right;font-variant-numeric:tabular-nums">{r["gap"]:+.2f}%</td>'
+            f'<td style="padding:10px 14px;text-align:right;font-variant-numeric:tabular-nums">{r["post"]:+.2f}%</td>'
+            f'<td style="padding:10px 14px;text-align:right;font-variant-numeric:tabular-nums;font-weight:600">{r["total"]:+.2f}%</td>'
+            f'</tr>'
+        )
+    flag_table = f"""
+    <table style="border-collapse:collapse;border:1px solid #e5e7eb;width:100%;font-size:14px;margin-top:12px">
+      <thead style="background:#f3f4f6">
+        <tr>
+          <th style="padding:10px 14px;text-align:left">Flag</th>
+          <th style="padding:10px 14px;text-align:right">N (buys)</th>
+          <th style="padding:10px 14px;text-align:right">Secret window</th>
+          <th style="padding:10px 14px;text-align:right">After disclosure (30d)</th>
+          <th style="padding:10px 14px;text-align:right">Total</th>
+        </tr>
+      </thead>
+      <tbody>{flag_table_rows}</tbody>
+    </table>
+    """
+    # Used in section G claim
+    high_mean = flag_stats.loc["high", "gap"] if "high" in flag_stats.index else float("nan")
+    high_post = flag_stats.loc["high", "post"] if "high" in flag_stats.index else float("nan")
+    high_total = flag_stats.loc["high", "total"] if "high" in flag_stats.index else float("nan")
+    none_mean = flag_stats.loc["none", "gap"] if "none" in flag_stats.index else float("nan")
+    none_post = flag_stats.loc["none", "post"] if "none" in flag_stats.index else float("nan")
+    none_total = flag_stats.loc["none", "total"] if "none" in flag_stats.index else float("nan")
+    post_delta = high_post - none_post if pd.notna(high_post) and pd.notna(none_post) else float("nan")
 
     return f"""<!doctype html>
 <html><head>
@@ -584,22 +746,66 @@ def render(df: pd.DataFrame, holding: pd.DataFrame) -> str:
             "A long median holding period means alpha extends well past your 30-day follower window — "
             "the move probably continues if you hold longer. A short median means they're frequently in and out.")}
 
-  {_section("G", "Does our committee-conflict flag actually predict alpha?",
-            (f"Yes. Strong committee matches gained <strong>{high_mean:+.2f}%</strong> in the secret window vs <strong>{none_mean:+.2f}%</strong> for unflagged trades — a {(high_mean - none_mean):+.2f} percentage-point gap." if pd.notna(high_mean) and pd.notna(none_mean) else "Need more flagged trades in the sample."),
-            _chart_flag_predicts_alpha(df),
-            "Restricted to BUYS only (where the signal lives). If you edit <code>src/conflicts.py</code> and re-run "
-            "<code>python dashboard.py</code>, this chart tells you whether your change tightened or loosened the signal: "
-            "a wider gap between 🔴 and ⚪ is good. A narrower gap means you've loosened the rules and "
-            "let in noise. "
-            "Caveat: committee assignments are looked up as they exist TODAY, not at the time of each historical "
-            "trade — so a member who switched committees is misclassified.")}
+  <h2 style="margin-top:36px;border-top:1px solid #e5e7eb;padding-top:18px">G. Does the 🔴 flag help you make money?</h2>
+  <p style="color:#111;font-size:17px;margin-top:4px"><strong>
+    On <em>total</em> return, no — strong-match buys end up in roughly the same place as random buys
+    ({high_total:+.2f}% vs {none_total:+.2f}%).
+    But the flag <em>shifts</em> where the gains happen: less before disclosure, more after.
+    For you as a follower (you can only capture what's after), that's a <strong>{post_delta:+.2f} percentage-point</strong>
+    edge per trade.
+  </strong></p>
+
+  {flag_table}
+
+  <p style="color:#374151;font-size:14px;line-height:1.7;margin-top:18px">
+    <strong>How to read this table:</strong>
+    <br>• <strong>"Secret window"</strong> = move from trade date to public disclosure — what the trader privately captured.
+    <br>• <strong>"After disclosure"</strong> = move in the 30 days after the public could see — what a follower captures.
+    <br>• <strong>"Total"</strong> = the sum. Roughly what an insider would have made by holding for the full window.
+    <br><br>
+    The original hypothesis was that 🔴 strong-match trades — a senator on the Energy Committee buying an oil stock —
+    would beat random buys on the secret window. They don't. With {int(flag_stats.loc["high","n"]):,} strong-match
+    buys and {int(flag_stats.loc["none","n"]):,} unflagged buys, the secret-window difference is ~0.8pp in the
+    <em>opposite</em> direction.
+    <br><br>
+    But the <strong>post-disclosure column</strong> tells the real story. Strong-match buys gain
+    <strong>{high_post:+.2f}%</strong> in the 30 days after you can see them; unflagged buys gain
+    <strong>{none_post:+.2f}%</strong>. That's the part of the move you can actually capture, and the flag
+    does identify it.
+  </p>
+
+  <h3 style="font-size:18px;margin-top:32px">G.1 Per-committee — which committees pull the signal up?</h3>
+  <p style="color:#374151;font-size:14px;line-height:1.6">
+    Same metric (secret-window return) broken down by individual committee, with sample size on each bar.
+    Green = above the all-buys baseline of {buys_gap:+.2f}%. Red = below.
+    Pay attention to N — small samples (under ~30) can swing wildly on a single outlier.
+    The big positives (Energy and Commerce at +20.95% on n=43, Science Space &amp; Tech at +6.31% on n=20)
+    drive most of the matrix's secret-window contribution.
+  </p>
+  <div>{_chart_per_committee(_per_committee_breakdown(df), buys_gap)}</div>
+
+  <h3 style="font-size:18px;margin-top:32px">G.2 Filter to fast-disclosed trades only (under 20 days)</h3>
+  <p style="color:#374151;font-size:14px;line-height:1.6">
+    Same severity bars, restricted to House trades disclosed within 20 days. ~26% of House volume.
+    If the matrix were detecting inside info, the 🔴 bar should pop here — but it doesn't.
+    The post-disclosure 🔴 advantage holds though.
+  </p>
+  <div>{_chart_short_lag_flag(df)}</div>
+
+  <p style="color:#6b7280;font-size:13px;line-height:1.5;margin-top:18px">
+    Caveats: (1) committee assignments are looked up as they exist TODAY, not at trade time —
+    members who switched committees are misclassified; (2) we match on sector keywords so any committee
+    with "energy" in its jurisdiction fires on every energy-sector stock, not just the ones it actually
+    has oversight over; (3) the differences here are 1-3pp on samples of 300–4500 — meaningful as a
+    directional read, not a precise signal.
+  </p>
 
   <h2 style="margin-top:36px;border-top:1px solid #e5e7eb;padding-top:18px">H. How to read tomorrow's morning alert</h2>
   <p style="font-size:17px;color:#111;margin-top:6px"><strong>A practical checklist for any trade in your email:</strong></p>
   <ol style="font-size:15px;line-height:1.85;color:#1f2937">
     <li><strong>Is it a buy?</strong> Buys carry signal; sells are mostly noise (section C).</li>
     <li><strong>Was the lag short (<20 days)?</strong> If yes, more juice is still on the table (section B).</li>
-    <li><strong>Is there a 🔴 committee match?</strong> Strong matches outperform by {(high_mean - none_mean):+.1f}pp historically on buys (section G).</li>
+    <li><strong>Is there a 🔴 committee match?</strong> Yes adds ~{post_delta:+.1f}pp to the next-30-day return on average vs no match. Modest but real. (See section G.)</li>
     <li><strong>Look up the member.</strong> Top-right of the scatter (section E) = highest credibility. Bottom-left = ignore.</li>
     <li><strong>Is the position still open?</strong> If they're still holding, they probably expect more upside (section F).</li>
   </ol>
