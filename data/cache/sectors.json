@@ -1,35 +1,195 @@
 {
+  "ADBE": {
+    "industry": "Software - Application",
+    "sector": "Technology"
+  },
+  "AMZN": {
+    "industry": "Internet Retail",
+    "sector": "Consumer Cyclical"
+  },
+  "APP": {
+    "industry": "Advertising Agencies",
+    "sector": "Communication Services"
+  },
+  "ARE": {
+    "industry": "REIT - Office",
+    "sector": "Real Estate"
+  },
   "BA": {
     "industry": "Aerospace & Defense",
+    "sector": "Industrials"
+  },
+  "BKNG": {
+    "industry": "Travel Services",
+    "sector": "Consumer Cyclical"
+  },
+  "BR": {
+    "industry": "Information Technology Services",
+    "sector": "Technology"
+  },
+  "BRO": {
+    "industry": "Insurance Brokers",
+    "sector": "Financial Services"
+  },
+  "CAG": {
+    "industry": "Packaged Foods",
+    "sector": "Consumer Defensive"
+  },
+  "CHTR": {
+    "industry": "Telecom Services",
+    "sector": "Communication Services"
+  },
+  "CLH": {
+    "industry": "Waste Management",
+    "sector": "Industrials"
+  },
+  "COIN": {
+    "industry": "Financial Data & Stock Exchanges",
+    "sector": "Financial Services"
+  },
+  "CRWD": {
+    "industry": "Software - Infrastructure",
+    "sector": "Technology"
+  },
+  "DASH": {
+    "industry": "Internet Retail",
+    "sector": "Consumer Cyclical"
+  },
+  "DPZ": {
+    "industry": "Restaurants",
+    "sector": "Consumer Cyclical"
+  },
+  "EFX": {
+    "industry": "Consulting Services",
     "sector": "Industrials"
   },
   "ENB": {
     "industry": "Oil & Gas Midstream",
     "sector": "Energy"
   },
+  "FBIN": {
+    "industry": "Building Products & Equipment",
+    "sector": "Industrials"
+  },
+  "FIS": {
+    "industry": "Information Technology Services",
+    "sector": "Technology"
+  },
+  "FLEX": {
+    "industry": "Electronic Components",
+    "sector": "Technology"
+  },
+  "FSV": {
+    "industry": "Real Estate Services",
+    "sector": "Real Estate"
+  },
   "FTAI": {
     "industry": "Aerospace & Defense",
     "sector": "Industrials"
+  },
+  "GIL": {
+    "industry": "Apparel Manufacturing",
+    "sector": "Consumer Cyclical"
+  },
+  "GPN": {
+    "industry": "Specialty Business Services",
+    "sector": "Industrials"
+  },
+  "HESAF": {
+    "industry": "Luxury Goods",
+    "sector": "Consumer Cyclical"
   },
   "HII": {
     "industry": "Aerospace & Defense",
     "sector": "Industrials"
   },
+  "IP": {
+    "industry": "Packaging & Containers",
+    "sector": "Consumer Cyclical"
+  },
+  "IT": {
+    "industry": "Information Technology Services",
+    "sector": "Technology"
+  },
+  "JKHY": {
+    "industry": "Information Technology Services",
+    "sector": "Technology"
+  },
   "JPM": {
     "industry": "Banks - Diversified",
     "sector": "Financial Services"
+  },
+  "LLY": {
+    "industry": "Drug Manufacturers - General",
+    "sector": "Healthcare"
   },
   "LMT": {
     "industry": "Aerospace & Defense",
     "sector": "Industrials"
   },
+  "MORN": {
+    "industry": "Financial Data & Stock Exchanges",
+    "sector": "Financial Services"
+  },
+  "MRVL": {
+    "industry": "Semiconductors",
+    "sector": "Technology"
+  },
+  "MSFT": {
+    "industry": "Software - Infrastructure",
+    "sector": "Technology"
+  },
   "NVDA": {
     "industry": "Semiconductors",
     "sector": "Technology"
   },
+  "NWS": {
+    "industry": "Entertainment",
+    "sector": "Communication Services"
+  },
+  "PAYX": {
+    "industry": "Software - Application",
+    "sector": "Technology"
+  },
+  "PKG": {
+    "industry": "Packaging & Containers",
+    "sector": "Consumer Cyclical"
+  },
+  "PWR": {
+    "industry": "Engineering & Construction",
+    "sector": "Industrials"
+  },
   "RRC": {
     "industry": "Oil & Gas E&P",
     "sector": "Energy"
+  },
+  "RVTY": {
+    "industry": "Diagnostics & Research",
+    "sector": "Healthcare"
+  },
+  "SCI": {
+    "industry": "Personal Services",
+    "sector": "Consumer Cyclical"
+  },
+  "SSNC": {
+    "industry": "Software - Application",
+    "sector": "Technology"
+  },
+  "STE": {
+    "industry": "Medical Devices",
+    "sector": "Healthcare"
+  },
+  "TDG": {
+    "industry": "Aerospace & Defense",
+    "sector": "Industrials"
+  },
+  "VIK": {
+    "industry": "Travel Services",
+    "sector": "Consumer Cyclical"
+  },
+  "W": {
+    "industry": "Internet Retail",
+    "sector": "Consumer Cyclical"
   },
   "WDS": {
     "industry": "Oil & Gas E&P",

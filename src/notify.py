@@ -8,14 +8,15 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Tuple
 
+from .scoring import CompositeScore
 from .types import PositionStatus, PriceInfo, Trade
 
-SEVERITY_RANK = {"high": 0, "moderate": 1, "low": 2, "none": 3}
-SEVERITY_BADGE = {
-    "high": ("🔴", "#b91c1c"),
-    "moderate": ("🟠", "#c2410c"),
-    "low": ("🟡", "#a16207"),
-    "none": ("⚪", "#525252"),
+TIER_RANK = {"high": 0, "moderate": 1, "weak": 2, "none": 3}
+TIER_BADGE = {
+    "high": ("🔴", "#b91c1c", "high"),
+    "moderate": ("🟠", "#c2410c", "moderate"),
+    "weak": ("🟡", "#a16207", "weak"),
+    "none": ("⚪", "#525252", "none"),
 }
 
 
@@ -42,19 +43,24 @@ def _position_cell(pos: PositionStatus) -> str:
 
 
 def _row_html(
-    t: Trade, severity: str, reasons: List[str], sector: str, industry: str,
+    t: Trade, score: CompositeScore, sector: str, industry: str,
     prices: PriceInfo, pos: PositionStatus,
 ) -> str:
-    badge, color = SEVERITY_BADGE[severity]
+    badge, color, label = TIER_BADGE[score.tier]
     lag = t.disclosure_lag_days
     lag_str = f"{lag}d" if lag is not None else "—"
     ticker = t.ticker or "—"
-    reasons_html = "<br>".join(html.escape(r) for r in reasons[:3]) if reasons else "—"
+    reasons_html = "<br>".join(html.escape(r) for r in score.reasons[:4]) if score.reasons else "—"
+    breakdown = (
+        f'<span style="color:#6b7280;font-size:11px">'
+        f'c:{score.committee} cl:{score.cluster} sz:{score.size} p:{score.policy}'
+        f'</span>'
+    )
     ptr_link = f'<a href="{html.escape(t.ptr_url)}">PTR</a>' if t.ptr_url else "—"
     today_d = prices.today_date.isoformat() if prices.today_date else ""
     return f"""
     <tr>
-      <td style="padding:6px 10px;vertical-align:top;color:{color};font-weight:600;white-space:nowrap">{badge} {severity}</td>
+      <td style="padding:6px 10px;vertical-align:top;color:{color};font-weight:600;white-space:nowrap">{badge} {label}<br><span style="color:{color};font-size:11px">total {score.total}/12</span><br>{breakdown}</td>
       <td style="padding:6px 10px;vertical-align:top">{html.escape(t.chamber.title())}</td>
       <td style="padding:6px 10px;vertical-align:top">{html.escape(t.member_name)}{f' ({html.escape(t.state)})' if t.state else ''}</td>
       <td style="padding:6px 10px;vertical-align:top;font-family:monospace;font-weight:600">{html.escape(ticker)}</td>
@@ -84,34 +90,32 @@ def _row_html(
 
 
 def render_email_html(
-    items: List[Tuple[Trade, str, List[str], str, str, PriceInfo, PositionStatus]],
+    items: List[Tuple[Trade, CompositeScore, str, str, PriceInfo, PositionStatus]],
 ) -> str:
-    # Sort: flagged trades first (high/mod/low), then unflagged. Within each
-    # group, most recently disclosed first.
+    # Sort: highest composite first, ties broken by most recently disclosed.
     items_sorted = sorted(
         items,
-        key=lambda x: (SEVERITY_RANK.get(x[1], 9), -(x[0].disclosure_date.toordinal())),
+        key=lambda x: (-x[1].total, -(x[0].disclosure_date.toordinal())),
     )
     rows = "".join(_row_html(*x) for x in items_sorted)
-    flagged = [x for x in items if x[1] != "none"]
-    high_count = sum(1 for _, sev, *_ in flagged if sev == "high")
-    mod_count = sum(1 for _, sev, *_ in flagged if sev == "moderate")
-    low_count = sum(1 for _, sev, *_ in flagged if sev == "low")
-    none_count = len(items) - len(flagged)
-    if flagged:
+    high_count = sum(1 for _, s, *_ in items if s.tier == "high")
+    mod_count = sum(1 for _, s, *_ in items if s.tier == "moderate")
+    weak_count = sum(1 for _, s, *_ in items if s.tier == "weak")
+    none_count = sum(1 for _, s, *_ in items if s.tier == "none")
+    if high_count + mod_count + weak_count:
         head = (
             f"<p><strong>{len(items)} new disclosure(s)</strong> — "
-            f"<span style='color:#dc2626'>🔴 {high_count} strong</span> · "
-            f"<span style='color:#ea580c'>🟠 {mod_count} some</span> · "
-            f"<span style='color:#ca8a04'>🟡 {low_count} weak</span> · "
-            f"<span style='color:#6b7280'>⚪ {none_count} no committee match</span>."
+            f"<span style='color:#dc2626'>🔴 {high_count} high</span> · "
+            f"<span style='color:#ea580c'>🟠 {mod_count} moderate</span> · "
+            f"<span style='color:#ca8a04'>🟡 {weak_count} weak</span> · "
+            f"<span style='color:#6b7280'>⚪ {none_count} none</span>."
             f"<br><span style='color:#6b7280;font-size:13px'>"
-            f"Flagged trades are shown first; unflagged trades follow.</span></p>"
+            f"Sorted by composite score (0–12); highest first.</span></p>"
         )
     else:
         head = (
             f"<p><strong>{len(items)} new disclosure(s)</strong> — "
-            f"<span style='color:#6b7280'>none flagged for committee/sector overlap.</span>"
+            f"<span style='color:#6b7280'>none scored above ⚪.</span>"
             f"<br><span style='color:#6b7280;font-size:13px'>"
             f"All trades shown below for completeness.</span></p>"
         )
@@ -122,14 +126,17 @@ def render_email_html(
       <h2 style="margin-bottom:4px">Congress trades — daily digest</h2>
       {head}
       <p style="color:#6b7280;font-size:13px;margin-top:0">
-        🔴 Member sits on a committee with direct jurisdiction over this stock's sector.
-        🟡 Indirect overlap (e.g. trade policy). Position = whether this purchase has been
-        closed by a later disclosed sale.
+        Composite score (0–12) sums four sub-scores (each 0–3):
+        <strong>c</strong> = direct committee jurisdiction;
+        <strong>cl</strong> = cluster (distinct members trading same ticker ±30d, same side);
+        <strong>sz</strong> = position size (disclosed amount range);
+        <strong>p</strong> = indirect policy proximity (softer committee links).
+        Tiers: 🔴 ≥7, 🟠 4–6, 🟡 2–3, ⚪ 0–1. A direct strong committee match keeps a trade at 🟠 or above regardless of total.
       </p>
       <table style="border-collapse:collapse;border:1px solid #ddd;font-size:13px;width:100%">
         <thead style="background:#f5f5f5">
           <tr>
-            <th style="padding:6px 10px;text-align:left">Flag</th>
+            <th style="padding:6px 10px;text-align:left">Score</th>
             <th style="padding:6px 10px;text-align:left">Chamber</th>
             <th style="padding:6px 10px;text-align:left">Member</th>
             <th style="padding:6px 10px;text-align:left">Ticker</th>
@@ -151,7 +158,7 @@ def render_email_html(
       </table>
       <p style="color:#6b7280;font-size:12px;margin-top:16px">
         Sources: official House Clerk disclosures + senate-stock-watcher.
-        Conflict matrix: <code>src/conflicts.py</code>. Prices via yfinance.
+        Direct matrix: <code>src/conflicts.py</code>. Composite scoring: <code>src/scoring.py</code>. Prices via yfinance.
       </p>
     </body></html>
     """

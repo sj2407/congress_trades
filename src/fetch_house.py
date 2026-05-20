@@ -149,7 +149,13 @@ def _parse_ptr_pdf(pdf_bytes: bytes) -> List[Tuple[Optional[str], str, str, Opti
                         m = TICKER_RE.search(asset or "")
                         ticker = m.group(1) if m else None
                         asset_clean = re.sub(r"\s+", " ", TICKER_RE.sub("", asset or "").replace("\n", " ")).strip(" -")
-                        tx_norm = TX_TYPE_MAP.get(tx.upper(), tx)
+                        # Fallback: pdfplumber sometimes drops the Type cell when it
+                        # contains a single letter (P/S/E). Re-scan the joined row.
+                        if not tx or tx in ("-", "—"):
+                            joined = " ".join((c or "") for c in row)
+                            tx_m = TX_TYPE_RE.search(joined)
+                            tx = tx_m.group(1) if tx_m else tx
+                        tx_norm = TX_TYPE_MAP.get(tx.upper(), tx) if tx else ""
                         rows.append((
                             ticker,
                             asset_clean,

@@ -20,11 +20,11 @@ from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 
 from src.committees import lookup_committees, lookup_member_info
-from src.conflicts import detect_conflict
 from src.fetch_house import fetch_house_trades
 from src.fetch_senate import fetch_senate_trades
 from src.notify import render_email_html, send_email
 from src.prices import latest_price, latest_price_date, price_on_or_after
+from src.scoring import score_trade
 from src.sectors import lookup_sector
 from src.store import filter_new, mark_seen
 from src.types import PositionStatus, PriceInfo
@@ -98,7 +98,7 @@ def run(lookback_hours: int, dry_run: bool, house_year: int | None, max_house: i
         if not t.party and info.get("party"):
             t.party = info.get("party")
         sector, industry = lookup_sector(t.ticker) if t.ticker else ("", "")
-        severity, reasons = detect_conflict(committees, sector, industry)
+        score = score_trade(t, all_trades, committees, sector, industry)
         # Prices and position status are only meaningful when we know the ticker
         prices = PriceInfo()
         pos = PositionStatus()
@@ -130,17 +130,18 @@ def run(lookback_hours: int, dry_run: bool, house_year: int | None, max_house: i
                     pos.state = "open"
             else:
                 pos.state = ""  # not applicable for sales
-        enriched.append((t, severity, reasons, sector, industry, prices, pos))
+        enriched.append((t, score, sector, industry, prices, pos))
 
-    flagged = [x for x in enriched if x[1] != "none"]
+    flagged = [x for x in enriched if x[1].tier != "none"]
     if not enriched and not preview_recent:
         print("  0 new disclosures — skipping email.", flush=True)
         return 0
 
-    high = sum(1 for _, s, *_ in flagged if s == "high")
+    high = sum(1 for _, s, *_ in enriched if s.tier == "high")
+    moderate = sum(1 for _, s, *_ in enriched if s.tier == "moderate")
     subject = (
         f"Congress trades — {len(enriched)} new"
-        f"{f' ({len(flagged)} flagged, {high} high)' if flagged else ' (none flagged)'}"
+        f"{f' ({high} high, {moderate} moderate)' if flagged else ' (none flagged)'}"
         f" — {date.today().isoformat()}"
     )
     body = render_email_html(enriched)
