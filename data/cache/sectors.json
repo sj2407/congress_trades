@@ -3,6 +3,18 @@
     "industry": "Aerospace & Defense",
     "sector": "Industrials"
   },
+  "ENB": {
+    "industry": "Oil & Gas Midstream",
+    "sector": "Energy"
+  },
+  "FTAI": {
+    "industry": "Aerospace & Defense",
+    "sector": "Industrials"
+  },
+  "HII": {
+    "industry": "Aerospace & Defense",
+    "sector": "Industrials"
+  },
   "JPM": {
     "industry": "Banks - Diversified",
     "sector": "Financial Services"
@@ -14,6 +26,18 @@
   "NVDA": {
     "industry": "Semiconductors",
     "sector": "Technology"
+  },
+  "RRC": {
+    "industry": "Oil & Gas E&P",
+    "sector": "Energy"
+  },
+  "WDS": {
+    "industry": "Oil & Gas E&P",
+    "sector": "Energy"
+  },
+  "WTSHF": {
+    "industry": "Marine Shipping",
+    "sector": "Industrials"
   },
   "XOM": {
     "industry": "Oil & Gas Integrated",
