@@ -72,7 +72,13 @@ def run(lookback_hours: int, dry_run: bool, house_year: int | None, max_house: i
         recent = [t for t in all_trades if t.disclosure_date >= cutoff_date]
         print(f"  within last {lookback_hours}h: {len(recent)}", flush=True)
 
-        new_trades = filter_new(recent)
+        # Public companies only: drop filings with no ticker (private holdings,
+        # non-securities, and parse-failed placeholders with nothing extracted).
+        public = [t for t in recent if t.ticker]
+        if len(public) != len(recent):
+            print(f"  dropped {len(recent) - len(public)} non-public / unparseable filing(s)", flush=True)
+
+        new_trades = filter_new(public)
         print(f"  new (not yet seen): {len(new_trades)}", flush=True)
 
     if not new_trades:
