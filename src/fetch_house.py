@@ -193,6 +193,112 @@ def _parse_ptr_pdf(pdf_bytes: bytes) -> List[Tuple[Optional[str], str, str, Opti
     return rows
 
 
+def _parse_ptr_pdf_fallback(pdf_bytes: bytes) -> List[Tuple[Optional[str], str, str, Optional[date], Optional[date], str, Optional[str]]]:
+    """Layer-2 fallback parser. Runs ONLY when _parse_ptr_pdf (Layer 1) returns
+    nothing for a PDF, so it can only *add* trades Layer 1 missed — never alter
+    a PDF Layer 1 already handled.
+
+    The dominant Layer-1 failure is pdfplumber collapsing the transaction
+    table's columns into one cell (or reflowing a wrapped amount / scrambling
+    token order onto the next visual line). That defeats the per-cell "$" check,
+    so every row is skipped. Here we ignore pdfplumber's cell boundaries and
+    rebuild columns from word x-positions, which is robust to both collapse and
+    reflow. Same return shape as _parse_ptr_pdf. Returns [] for scanned/image
+    PDFs with no text layer (nothing to rebuild — those need OCR).
+    """
+    rows: List[Tuple] = []
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                words = page.extract_words()
+                if not words:
+                    continue
+                # Column left-edges come from a few stable single-word header
+                # anchors (the PTR header wraps over two lines, so we avoid the
+                # multi-word ones like "Transaction Type").
+                anchor: dict = {}
+                for w in words:
+                    t = w["text"]
+                    if t in ("Asset", "Type", "Notification", "Amount") and t not in anchor:
+                        anchor[t] = w["x0"]
+                if not {"Asset", "Type", "Amount"} <= anchor.keys():
+                    continue  # not a standard PTR transaction page
+                asset_x = anchor["Asset"]
+                type_x = anchor["Type"]
+                notif_x = anchor.get("Notification", type_x + 120)
+                amt_x = anchor["Amount"]
+                txd_x = (type_x + notif_x) / 2  # transaction-date col sits between
+
+                def col(x: float) -> str:
+                    if x < asset_x - 8:   return "owner"
+                    if x < type_x - 3:    return "asset"
+                    if x < txd_x:         return "type"
+                    if x < notif_x - 3:   return "txdate"
+                    if x < amt_x - 3:     return "notif"
+                    return "amount"
+
+                # Data band starts just below the header. Anchor off the first
+                # "Asset" header word (its column title); scanning for the lowest
+                # header token mis-fires on stray glyphs repeated down the page.
+                hdr_top = min((w["top"] for w in words if w["text"] == "Asset"),
+                              default=0)
+                data = [w for w in words if w["top"] > hdr_top + 6]
+
+                # Each transaction is anchored by a single-letter type token
+                # (P/S/E) in the Type column; a row may wrap to a 2nd visual line.
+                type_anchors = sorted(
+                    (w for w in data
+                     if col(w["x0"]) == "type" and w["text"] in ("P", "S", "E")),
+                    key=lambda w: w["top"],
+                )
+                for i, ta in enumerate(type_anchors):
+                    y0 = ta["top"] - 4
+                    y1 = (type_anchors[i + 1]["top"] - 4
+                          if i + 1 < len(type_anchors) else ta["top"] + 24)
+                    win = [w for w in data if y0 <= w["top"] < y1]
+                    # Per-transaction sub-detail lines (Filing Status, Subholding
+                    # Of, Description…) render in a small-caps font that extracts
+                    # with NUL chars. They sit below the transaction and would
+                    # contaminate the asset cell — cut the row before the first.
+                    cut_y = min((w["top"] for w in win if "\x00" in w["text"]),
+                                default=y1)
+                    cells: dict = {"owner": [], "asset": [], "type": [],
+                                   "txdate": [], "notif": [], "amount": []}
+                    for w in sorted(win, key=lambda w: (w["top"], w["x0"])):
+                        if w["top"] < cut_y and "\x00" not in w["text"]:
+                            cells[col(w["x0"])].append(w["text"])
+                    amt = re.sub(r"\s+", " ", " ".join(cells["amount"])).strip()
+                    txd = next((DATE_RE.search(t).group(1) for t in cells["txdate"]
+                                if DATE_RE.search(t)), "")
+                    nd = next((DATE_RE.search(t).group(1) for t in cells["notif"]
+                               if DATE_RE.search(t)), "")
+                    # Validate it's a real transaction row, not footer noise.
+                    if "$" not in amt or not (txd or nd):
+                        continue
+                    asset_raw = " ".join(cells["asset"])
+                    m = TICKER_RE.search(asset_raw)
+                    ticker = m.group(1) if m else None
+                    asset_clean = re.sub(r"\s+", " ",
+                                         re.sub(r"\[[A-Z0-9]{1,4}\]", "",
+                                                TICKER_RE.sub("", asset_raw))).strip(" -")
+                    tx_txt = " ".join(cells["type"]).strip()
+                    tx_norm = TX_TYPE_MAP.get(tx_txt.upper(), tx_txt)
+                    owner = next((o for o in cells["owner"]
+                                  if o.upper() in ("SP", "JT", "DC")), None)
+                    rows.append((
+                        ticker,
+                        asset_clean,
+                        tx_norm,
+                        _parse_date(txd),
+                        _parse_date(nd),
+                        amt,
+                        owner,
+                    ))
+    except Exception:
+        return []
+    return rows
+
+
 def fetch_house_trades(year: Optional[int] = None, max_ptrs: Optional[int] = None) -> List[Trade]:
     """Fetch + parse House PTRs for the given year (default: current year)."""
     if year is None:
@@ -207,6 +313,9 @@ def fetch_house_trades(year: Optional[int] = None, max_ptrs: Optional[int] = Non
         pdf_url = CLERK_PDF_TMPL.format(year=entry["year"], doc=entry["doc_id"])
         pdf_bytes = _download_pdf(entry["year"], entry["doc_id"])
         parsed = _parse_ptr_pdf(pdf_bytes) if pdf_bytes else []
+        if not parsed and pdf_bytes:
+            # Layer 2: only when the table parser found nothing for this PDF.
+            parsed = _parse_ptr_pdf_fallback(pdf_bytes)
         if not parsed:
             # Emit a single placeholder trade so the email still surfaces this filing
             trades.append(Trade(
