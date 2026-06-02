@@ -1,4 +1,8 @@
 {
+  "AAPL": {
+    "industry": "Consumer Electronics",
+    "sector": "Technology"
+  },
   "ADBE": {
     "industry": "Software - Application",
     "sector": "Technology"
