@@ -19,6 +19,10 @@
     "industry": "REIT - Office",
     "sector": "Real Estate"
   },
+  "ARLP": {
+    "industry": "Thermal Coal",
+    "sector": "Energy"
+  },
   "BA": {
     "industry": "Aerospace & Defense",
     "sector": "Industrials"
