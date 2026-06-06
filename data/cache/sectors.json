@@ -159,6 +159,10 @@
     "industry": "Software - Application",
     "sector": "Technology"
   },
+  "PG": {
+    "industry": "Household & Personal Products",
+    "sector": "Consumer Defensive"
+  },
   "PKG": {
     "industry": "Packaging & Containers",
     "sector": "Consumer Cyclical"
@@ -178,6 +182,10 @@
   "SCI": {
     "industry": "Personal Services",
     "sector": "Consumer Cyclical"
+  },
+  "SONY": {
+    "industry": "Consumer Electronics",
+    "sector": "Technology"
   },
   "SSNC": {
     "industry": "Software - Application",
