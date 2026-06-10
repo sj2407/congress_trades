@@ -7,6 +7,10 @@
     "industry": "Software - Application",
     "sector": "Technology"
   },
+  "AMD": {
+    "industry": "Semiconductors",
+    "sector": "Technology"
+  },
   "AMZN": {
     "industry": "Internet Retail",
     "sector": "Consumer Cyclical"
@@ -23,9 +27,17 @@
     "industry": "Thermal Coal",
     "sector": "Energy"
   },
+  "AZO": {
+    "industry": "Auto Parts",
+    "sector": "Consumer Cyclical"
+  },
   "BA": {
     "industry": "Aerospace & Defense",
     "sector": "Industrials"
+  },
+  "BBIO": {
+    "industry": "Biotechnology",
+    "sector": "Healthcare"
   },
   "BKNG": {
     "industry": "Travel Services",
@@ -39,6 +51,10 @@
     "industry": "Insurance Brokers",
     "sector": "Financial Services"
   },
+  "BSX": {
+    "industry": "Medical Devices",
+    "sector": "Healthcare"
+  },
   "CAG": {
     "industry": "Packaged Foods",
     "sector": "Consumer Defensive"
@@ -47,21 +63,41 @@
     "industry": "Telecom Services",
     "sector": "Communication Services"
   },
+  "CIEN": {
+    "industry": "Communication Equipment",
+    "sector": "Technology"
+  },
   "CLH": {
     "industry": "Waste Management",
     "sector": "Industrials"
+  },
+  "CLX": {
+    "industry": "Household & Personal Products",
+    "sector": "Consumer Defensive"
   },
   "COIN": {
     "industry": "Financial Data & Stock Exchanges",
     "sector": "Financial Services"
   },
+  "CPB": {
+    "industry": "Packaged Foods",
+    "sector": "Consumer Defensive"
+  },
   "CRWD": {
     "industry": "Software - Infrastructure",
     "sector": "Technology"
   },
+  "CVNA": {
+    "industry": "Auto & Truck Dealerships",
+    "sector": "Consumer Cyclical"
+  },
   "DASH": {
     "industry": "Internet Retail",
     "sector": "Consumer Cyclical"
+  },
+  "DCO": {
+    "industry": "Aerospace & Defense",
+    "sector": "Industrials"
   },
   "DPZ": {
     "industry": "Restaurants",
@@ -84,6 +120,10 @@
     "sector": "Technology"
   },
   "FLEX": {
+    "industry": "Electronic Components",
+    "sector": "Technology"
+  },
+  "FN": {
     "industry": "Electronic Components",
     "sector": "Technology"
   },
@@ -111,6 +151,14 @@
     "industry": "Aerospace & Defense",
     "sector": "Industrials"
   },
+  "HQY": {
+    "industry": "Health Information Services",
+    "sector": "Healthcare"
+  },
+  "IBM": {
+    "industry": "Information Technology Services",
+    "sector": "Technology"
+  },
   "IP": {
     "industry": "Packaging & Containers",
     "sector": "Consumer Cyclical"
@@ -135,6 +183,14 @@
     "industry": "Aerospace & Defense",
     "sector": "Industrials"
   },
+  "LPLA": {
+    "industry": "Capital Markets",
+    "sector": "Financial Services"
+  },
+  "MELI": {
+    "industry": "Internet Retail",
+    "sector": "Consumer Cyclical"
+  },
   "MORN": {
     "industry": "Financial Data & Stock Exchanges",
     "sector": "Financial Services"
@@ -145,6 +201,10 @@
   },
   "MSFT": {
     "industry": "Software - Infrastructure",
+    "sector": "Technology"
+  },
+  "MTSI": {
+    "industry": "Semiconductors",
     "sector": "Technology"
   },
   "NVDA": {
@@ -159,6 +219,10 @@
     "industry": "Software - Application",
     "sector": "Technology"
   },
+  "PCVX": {
+    "industry": "Biotechnology",
+    "sector": "Healthcare"
+  },
   "PG": {
     "industry": "Household & Personal Products",
     "sector": "Consumer Defensive"
@@ -166,6 +230,10 @@
   "PKG": {
     "industry": "Packaging & Containers",
     "sector": "Consumer Cyclical"
+  },
+  "PLTR": {
+    "industry": "Software - Infrastructure",
+    "sector": "Technology"
   },
   "PWR": {
     "industry": "Engineering & Construction",
@@ -179,6 +247,10 @@
     "industry": "Diagnostics & Research",
     "sector": "Healthcare"
   },
+  "SARO": {
+    "industry": "Aerospace & Defense",
+    "sector": "Industrials"
+  },
   "SCI": {
     "industry": "Personal Services",
     "sector": "Consumer Cyclical"
@@ -191,17 +263,53 @@
     "industry": "Software - Application",
     "sector": "Technology"
   },
+  "ST": {
+    "industry": "Scientific & Technical Instruments",
+    "sector": "Technology"
+  },
   "STE": {
     "industry": "Medical Devices",
     "sector": "Healthcare"
+  },
+  "STZ": {
+    "industry": "Beverages - Brewers",
+    "sector": "Consumer Defensive"
+  },
+  "TCBI": {
+    "industry": "Banks - Regional",
+    "sector": "Financial Services"
   },
   "TDG": {
     "industry": "Aerospace & Defense",
     "sector": "Industrials"
   },
+  "TEL": {
+    "industry": "Electronic Components",
+    "sector": "Technology"
+  },
+  "TPH": {
+    "industry": "Residential Construction",
+    "sector": "Consumer Cyclical"
+  },
+  "TTD": {
+    "industry": "Advertising Agencies",
+    "sector": "Communication Services"
+  },
+  "TYL": {
+    "industry": "Software - Application",
+    "sector": "Technology"
+  },
+  "VIAV": {
+    "industry": "Communication Equipment",
+    "sector": "Technology"
+  },
   "VIK": {
     "industry": "Travel Services",
     "sector": "Consumer Cyclical"
+  },
+  "VLTO": {
+    "industry": "Pollution & Treatment Controls",
+    "sector": "Industrials"
   },
   "W": {
     "industry": "Internet Retail",
@@ -210,6 +318,10 @@
   "WDS": {
     "industry": "Oil & Gas E&P",
     "sector": "Energy"
+  },
+  "WRB": {
+    "industry": "Insurance - Property & Casualty",
+    "sector": "Financial Services"
   },
   "WTSHF": {
     "industry": "Marine Shipping",
