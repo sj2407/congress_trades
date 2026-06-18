@@ -27,6 +27,10 @@
     "industry": "Thermal Coal",
     "sector": "Energy"
   },
+  "AXP": {
+    "industry": "Credit Services",
+    "sector": "Financial Services"
+  },
   "AZO": {
     "industry": "Auto Parts",
     "sector": "Consumer Cyclical"
