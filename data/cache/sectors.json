@@ -163,6 +163,10 @@
     "industry": "Information Technology Services",
     "sector": "Technology"
   },
+  "INTC": {
+    "industry": "Semiconductors",
+    "sector": "Technology"
+  },
   "IP": {
     "industry": "Packaging & Containers",
     "sector": "Consumer Cyclical"
